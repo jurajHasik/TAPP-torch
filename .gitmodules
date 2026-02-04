@@ -1,0 +1,6 @@
+[submodule "third_party/tblis"]
+	path = third_party/tblis
+	url = https://github.com/MatthewsResearchGroup/tblis
+[submodule "third_party/tapp"]
+	path = third_party/tapp
+	url = https://github.com/TAPPorg/reference-implementation

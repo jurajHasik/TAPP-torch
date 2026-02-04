@@ -1,0 +1,211 @@
+#include <Python.h>
+
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/macros/Macros.h>
+#include <tapp.h>
+// #include <stdexcept>
+#include <vector>
+#include <string>
+
+extern "C" {
+  /* Creates a dummy empty _C module that can be imported from Python.
+     The import from Python will load the .so consisting of this file
+     in this extension, so that the STABLE_TORCH_LIBRARY static initializers
+     below are run. */
+  PyObject* PyInit__C(void)
+  {
+      static struct PyModuleDef module_def = {
+          PyModuleDef_HEAD_INIT,
+          "_C",   /* name of module */
+          NULL,   /* module documentation, may be NULL */
+          -1,     /* size of per-interpreter state of the module,
+                     or -1 if the module keeps state in global variables. */
+          NULL,   /* methods */
+      };
+      return PyModule_Create(&module_def);
+  }
+}
+
+namespace tapp_torch {
+
+namespace {
+
+// Convert PyTorch dtype to TAPP datatype
+TAPP_datatype get_tapp_dtype(const torch::stable::Tensor& tensor) {
+    auto dtype = tensor.scalar_type();
+    switch (dtype) {
+        case torch::headeronly::ScalarType::Float:
+            return TAPP_F32;
+        case torch::headeronly::ScalarType::Double:
+            return TAPP_F64;
+        case torch::headeronly::ScalarType::ComplexFloat:
+            return TAPP_C32;
+        case torch::headeronly::ScalarType::ComplexDouble:
+            return TAPP_C64;
+        default:
+            throw std::runtime_error("Unsupported (torch) tensor dtype for TAPP contraction");
+    }
+}
+
+std::vector<int64_t> get_extents(const torch::stable::Tensor& tensor) {
+    auto sizes = tensor.sizes();
+    return std::vector<int64_t>(sizes.begin(), sizes.end());
+}
+
+std::vector<int64_t> get_strides(const torch::stable::Tensor& tensor) {
+    auto strides = tensor.strides();
+    return std::vector<int64_t>(strides.begin(), strides.end());
+}
+
+}
+
+// D <- a*A*B+b*C.
+void tensor_product(
+  const torch::stable::Tensor& A,
+  const torch::stable::Tensor& B,
+  const torch::stable::Tensor& C,
+  torch::stable::Tensor& D,
+  const std::vector<int64_t>& idx_A,
+  const std::vector<int64_t>& idx_B,
+  const std::optional<std::vector<int64_t>>& idx_C,
+  const std::vector<int64_t>& idx_D,
+  double alpha,
+  double beta) {
+
+  STD_TORCH_CHECK(A.scalar_type() == B.scalar_type() && A.scalar_type() == D.scalar_type(), 
+  "All tensors must have the same dtype");
+  STD_TORCH_CHECK(A.device().type() == torch::headeronly::DeviceType::CPU);
+  STD_TORCH_CHECK(B.device().type() == torch::headeronly::DeviceType::CPU);
+  STD_TORCH_CHECK(D.device().type() == torch::headeronly::DeviceType::CPU);
+  STD_TORCH_CHECK(static_cast<int64_t>(idx_A.size()) == A.dim(), 
+      "Index vector length must match tensor A dimensions");
+  STD_TORCH_CHECK(static_cast<int64_t>(idx_B.size()) == B.dim(), 
+      "Index vector length must match tensor B dimensions");
+  STD_TORCH_CHECK(static_cast<int64_t>(idx_D.size()) == D.dim(), 
+      "Index vector length must match tensor D dimensions");
+  STD_TORCH_CHECK((C.defined() && idx_C.has_value()) || (!C.defined() && !idx_C.has_value()),
+    "Either both C tensor and idx_C must be provided, or neither");
+  STD_TORCH_CHECK(C.defined() || beta == 0.0, "If beta is non-zero, tensor C must be provided");
+  
+  if (C.defined()) {
+    // TODO if c is provided, verify it matches output shape - d  
+    STD_TORCH_CHECK(C.sizes().equals(D.sizes()));
+    STD_TORCH_CHECK(C.scalar_type() == A.scalar_type(), "All tensors must have the same dtype");
+    STD_TORCH_CHECK(C.device().type() == torch::headeronly::DeviceType::CPU);
+    STD_TORCH_CHECK(static_cast<int64_t>(idx_C->size()) == C.dim(), 
+            "Index vector length must match tensor C dimensions");
+  }
+  // TODO validated dtype of alpha, beta
+
+  // Get TAPP datatype
+  TAPP_datatype dtype = get_tapp_dtype(D);
+
+  // Get extents and strides
+  auto extents_A = get_extents(A);
+  auto strides_A = get_strides(A);
+  auto extents_B = get_extents(B);
+  auto strides_B = get_strides(B);
+  auto extents_D = get_extents(D);
+  auto strides_D = get_strides(D);
+
+  // const std::vector<int64_t>& idx_C_val = idx_C.has_value() ? idx_C.value() : idx_D;
+
+  // TODO do we need contiguity ?
+  // torch::stable::Tensor a_contig = torch::stable::contiguous(a);
+  // ...
+
+  // Create TAPP tensor info structures
+  TAPP_tensor_info info_A, info_B, info_C, info_D;
+  TAPP_create_tensor_info(&info_A, dtype, A.dim(), extents_A.data(), strides_A.data());
+  TAPP_create_tensor_info(&info_B, dtype, B.dim(), extents_B.data(), strides_B.data());
+  TAPP_create_tensor_info(&info_D, dtype, D.dim(), extents_D.data(), strides_D.data());
+  if (C.defined()) {
+    auto extents_C = get_extents(C);
+    auto strides_C = get_strides(C);
+    TAPP_create_tensor_info(&info_C, dtype, C.dim(), extents_C.data(), strides_C.data());
+  } else {
+    // TODO do we always require idx_C == idx_D ? Or in case of C being empty we can avoid this.
+    // Use idx_D as default for idx_C
+    TAPP_create_tensor_info(&info_C, dtype, D.dim(), extents_D.data(), strides_D.data());
+  }
+
+  // Decide elemental operations (conjugate available for complex datatypes)
+  TAPP_element_op op_A = TAPP_IDENTITY; // Decide elemental operation for tensor A
+  TAPP_element_op op_B = TAPP_IDENTITY; // Decide elemental operation for tensor B
+  TAPP_element_op op_C = TAPP_IDENTITY; // Decide elemental operation for tensor C
+  TAPP_element_op op_D = TAPP_IDENTITY; // Decide elemental operation for tensor D
+
+  TAPP_handle handle;
+  TAPP_create_handle(&handle);
+  TAPP_prectype prec = TAPP_DEFAULT_PREC; //Choose the calculation precision
+  TAPP_tensor_product plan; // Declare the variable that holds the information about the calculation 
+  
+  TAPP_create_tensor_product(
+  &plan, handle,
+  op_A, info_A, idx_A.data(),
+  op_B, info_B, idx_B.data(),
+  op_C, info_C, C.defined() ? idx_C->data() : idx_D.data(),
+  op_D, info_D, idx_D.data(),
+  prec
+  );
+
+  TAPP_executor exec; // Declaration of executor
+  TAPP_create_executor(&exec); // Creation of executor
+  // int exec_id = 1; // Choose executor
+  // exec = (intptr_t)&exec_id; // Assign executor
+
+  // Execute the contraction
+  TAPP_status status;
+  TAPP_error error = TAPP_execute_product(
+  plan, exec, &status,
+  (void*)&alpha,
+  A.const_data_ptr(),
+  B.const_data_ptr(),
+  (void*)&beta,
+  C.defined() ? C.const_data_ptr() : nullptr,
+  (void*)D.mutable_data_ptr()
+  );
+
+  // Check for errors
+  if (!TAPP_check_success(error)) {
+    int msg_len = TAPP_explain_error(error, 0, nullptr);
+    std::vector<char> msg_buff(msg_len + 1);
+    TAPP_explain_error(error, msg_len + 1, msg_buff.data());
+    
+    // Cleanup before throwing
+    TAPP_destroy_tensor_product(plan);
+    TAPP_destroy_tensor_info(info_A);
+    TAPP_destroy_tensor_info(info_B);
+    TAPP_destroy_tensor_info(info_C);
+    TAPP_destroy_tensor_info(info_D);
+    TAPP_destroy_executor(exec);
+    
+    STD_TORCH_CHECK(false, "TAPP contraction failed: ", msg_buff.data());
+  }
+
+  // Cleanup
+  TAPP_destroy_tensor_product(plan);
+  TAPP_destroy_tensor_info(info_A);
+  TAPP_destroy_tensor_info(info_B);
+  TAPP_destroy_tensor_info(info_C);
+  TAPP_destroy_tensor_info(info_D);
+  TAPP_destroy_executor(exec);
+}
+
+// Defines the operators
+// TODO consider different alpha, beta types
+STABLE_TORCH_LIBRARY(tapp_torch, m) {
+  m.def("tensor_product(Tensor a, Tensor b, Tensor c, Tensor(t!) out, "
+    "int[] modes_A, int[] modes_B, int[]? modes_C, int[] modes_out, "
+    "float alpha, float beta) -> ()");
+}
+
+// Registers CPU implementations for mymuladd, mymul, myadd_out
+STABLE_TORCH_LIBRARY_IMPL(tapp_torch, CPU, m) {
+  m.impl("tensor_product", TORCH_BOX(&tensor_product));
+}
+
+} // namespace tapp_torch

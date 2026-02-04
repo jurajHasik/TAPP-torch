@@ -1,0 +1,3 @@
+Copyright holders:
+Juraj Hasik (University of Zurich, Switzerland) - juraj.hasik at physik.uzh.ch
+...

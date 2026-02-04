@@ -1,12 +1,22 @@
 # TAPP extension for PyTorch
 
-[TAPP interface](https://github.com/TAPPorg/tensor-interfaces) as (composable) PyTorch operator extension via Stable ABI
+[TAPP interface](https://github.com/TAPPorg/tensor-interfaces) as (composable) PyTorch operator extension via [Stable ABI](https://docs.pytorch.org/cppdocs/stable.html#torch-stable-api)
 
-```
+For general binary tensory contraction plus addition $D= \alpha AB + \beta C$
+
+````python
 tapp_torch.ops.tensor_product(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor, 
-                   modes_A: Sequence[int], modes_B: Sequence[int], modes_C: Union[Sequence[int],None], modes_D: Sequence[int],
-                   alpha: Union[float,complex,Tensor,None], beta: Union[float,complex,Tensor,None]) -> None:
-```
+    modes_A: Sequence[int], modes_B: Sequence[int], modes_C: Union[Sequence[int],None], modes_D: Sequence[int], 
+    alpha: Union[float,complex,Tensor,None], beta: Union[float,complex,Tensor,None]) -> None:
+````
+
+and a tensordot subset with autograd and torch.compile support
+
+````python
+tapp_torch.ops.tensordot(A: Tensor, B: Tensor, 
+    contracted_modes_A: List[int], contracted_modes_B: List[int],
+    modes_out: Optional[List[int]]=None) -> Tensor:
+````
 
 Requires Pytorch 2.10+
 
@@ -32,6 +42,8 @@ make -j <number-of-cores>
 ```
 
 Build and install PyTorch extension (from the root of the repo)
+
+NOTE: If needed, adjust the path to TAPP build in `setup.py` accordingly. By default it is set to `third_party/tapp/build`.
 
 ```
 pip install --no-build-isolation -e .

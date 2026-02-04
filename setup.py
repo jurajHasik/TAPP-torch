@@ -108,23 +108,3 @@ setup(
     cmdclass={"build_ext": BuildExtension},
     options={"bdist_wheel": {"py_limited_api": "cp39"}} if py_limited_api else {},
 )
-
-# git submodule update --init --recursive
-#
-# mkdir build && cd build
-#
-# Usage
-# You can now configure the build in two ways:
-
-# 1. Fetch from GitHub (default behavior):
-
-# 2. Use a custom local path:
-
-# 3. Use a git submodule in third_party:
-
-# This approach follows CMake best practices by:
-
-# Using a CACHE PATH variable for the custom path
-# Validating that the provided path contains a CMakeLists.txt
-# Providing informative status/error messages
-# Falling back to FetchContent when no custom path is provided

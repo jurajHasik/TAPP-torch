@@ -6,6 +6,7 @@
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/macros/Macros.h>
 #include <tapp.h>
+#include <complex>
 // #include <stdexcept>
 #include <vector>
 #include <string>
@@ -63,7 +64,8 @@ std::vector<int64_t> get_strides(const torch::stable::Tensor& tensor) {
 }
 
 // D <- a*A*B+b*C.
-void tensor_product(
+template <typename scalar_t>
+void tensor_product_impl(
   const torch::stable::Tensor& A,
   const torch::stable::Tensor& B,
   const torch::stable::Tensor& C,
@@ -72,8 +74,8 @@ void tensor_product(
   const std::vector<int64_t>& idx_B,
   const std::optional<std::vector<int64_t>>& idx_C,
   const std::vector<int64_t>& idx_D,
-  double alpha,
-  double beta) {
+  scalar_t alpha,
+  scalar_t beta) {
 
   STD_TORCH_CHECK(A.scalar_type() == B.scalar_type() && A.scalar_type() == D.scalar_type(), 
   "All tensors must have the same dtype");
@@ -88,8 +90,8 @@ void tensor_product(
       "Index vector length must match tensor D dimensions");
   STD_TORCH_CHECK((C.defined() && idx_C.has_value()) || (!C.defined() && !idx_C.has_value()),
     "Either both C tensor and idx_C must be provided, or neither");
-  STD_TORCH_CHECK(C.defined() || beta == 0.0, "If beta is non-zero, tensor C must be provided");
-  
+  STD_TORCH_CHECK(C.defined() || beta == scalar_t(0), "If beta is non-zero, tensor C must be provided");
+
   if (C.defined()) {
     // TODO if c is provided, verify it matches output shape - d  
     STD_TORCH_CHECK(C.sizes().equals(D.sizes()));
@@ -195,15 +197,72 @@ void tensor_product(
   TAPP_destroy_executor(exec);
 }
 
+// Non-templated wrapper for Python binding (alpha/beta as 0-dim tensors)
+void tensor_product(
+  const torch::stable::Tensor& A,
+  const torch::stable::Tensor& B,
+  const torch::stable::Tensor& C,
+  torch::stable::Tensor& D,
+  const std::vector<int64_t>& idx_A,
+  const std::vector<int64_t>& idx_B,
+  const std::optional<std::vector<int64_t>>& idx_C,
+  const std::vector<int64_t>& idx_D,
+  const torch::stable::Tensor& alpha_t,
+  const torch::stable::Tensor& beta_t) {
+
+  STD_TORCH_CHECK(alpha_t.defined() && beta_t.defined(), "alpha/beta must be defined");
+  STD_TORCH_CHECK(alpha_t.dim() == 0 && beta_t.dim() == 0, "alpha/beta must be 0-dim tensors");
+  STD_TORCH_CHECK(alpha_t.scalar_type() == beta_t.scalar_type(), "alpha/beta dtype must match");
+
+  // currently not available ?
+  // stable ABI does not support Scalar.
+  //
+  // THO_DISPATCH_FLOATING_TYPES(D.scalar_type(), "tensor_product_impl", [&] {
+  //   // scalar_t is the resolved type
+  //   tensor_product_impl<scalar_type>(A, B, C, D, idx_A, idx_B, idx_C, idx_D,
+  //                                 static_cast<scalar_type>(alpha),
+  //                                 static_cast<scalar_type>(beta));
+  // });
+
+  switch (alpha_t.scalar_type()) {
+      case torch::headeronly::ScalarType::Float: {
+          auto alpha = *static_cast<const float*>(alpha_t.const_data_ptr());
+          auto beta  = *static_cast<const float*>(beta_t.const_data_ptr());
+          tensor_product_impl<float>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          break;
+      }
+      case torch::headeronly::ScalarType::Double: {
+          auto alpha = *static_cast<const double*>(alpha_t.const_data_ptr());
+          auto beta  = *static_cast<const double*>(beta_t.const_data_ptr());
+          tensor_product_impl<double>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          break;
+      }
+      case torch::headeronly::ScalarType::ComplexFloat: {
+          auto alpha = *static_cast<const std::complex<float>*>(alpha_t.const_data_ptr());
+          auto beta  = *static_cast<const std::complex<float>*>(beta_t.const_data_ptr());
+          tensor_product_impl<std::complex<float>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          break;
+      }
+      case torch::headeronly::ScalarType::ComplexDouble: {
+          auto alpha = *static_cast<const std::complex<double>*>(alpha_t.const_data_ptr());
+          auto beta  = *static_cast<const std::complex<double>*>(beta_t.const_data_ptr());
+          tensor_product_impl<std::complex<double>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          break;
+      }
+      default:
+          throw std::runtime_error("Unsupported dtype alpha/beta for TAPP contraction");
+  }
+}
+
 // Defines the operators
 // TODO consider different alpha, beta types
 STABLE_TORCH_LIBRARY(tapp_torch, m) {
   m.def("tensor_product(Tensor a, Tensor b, Tensor c, Tensor(t!) out, "
     "int[] modes_A, int[] modes_B, int[]? modes_C, int[] modes_out, "
-    "float alpha, float beta) -> ()");
+    "Tensor alpha, Tensor beta) -> ()");
 }
 
-// Registers CPU implementations for mymuladd, mymul, myadd_out
+// Registers CPU implementations
 STABLE_TORCH_LIBRARY_IMPL(tapp_torch, CPU, m) {
   m.impl("tensor_product", TORCH_BOX(&tensor_product));
 }

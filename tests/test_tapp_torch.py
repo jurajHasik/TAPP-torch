@@ -11,7 +11,7 @@ from torch.testing._internal.optests import opcheck
 def reference_tensor_product(a, b, c, d,
                              modes_a, modes_b, modes_c, modes_d,
                              alpha, beta):
-    d= alpha * torch.einsum(a, modes_a, b, modes_b, modes_d) + beta * c 
+    d= alpha * torch.einsum(a, modes_a, b, modes_b, modes_d) + (beta * c if c is not None else 0) 
     return d
 
 def reference_tensordot(a, b, contract_idx_a, contract_idx_b, out_order= None):
@@ -35,9 +35,9 @@ class TestTensorProduct(TestCase):
             return torch.randn(size, dtype=dtype, device=device, requires_grad=False)
 
         return [
-            [make_tensor(1), make_tensor(1), make_tensor(1), make_tensor(1), [1,], [1,], [1,], [1,], 1, 1],
-            # [make_tensor(3), make_tensor(3), None, make_tensor(), [1,], [1,], None, [], 1, 1],
-            # [make_tensor(3,3), make_tensor(3,3), None, make_tensor(3,3), [0,1], [1,2], None, [0,2], 1, 1],
+            [make_tensor(1), make_tensor(1), make_tensor(1), make_tensor(1), [0,], [0,], [0,], [0,], make_tensor(), make_tensor()],
+            [make_tensor(3), make_tensor(3), None, make_tensor(), [1,], [1,], None, [], make_tensor(), 0*make_tensor()],
+            [make_tensor(3,3), make_tensor(3,3), None, make_tensor(3,3), [0,1], [1,2], None, [0,2], make_tensor(), 0*make_tensor()],
         ]
 
     @parametrize("device", ["cpu",])
@@ -69,7 +69,7 @@ class TestTensorProduct(TestCase):
     def test_opcheck(self, dtype, device):
         samples = self.sample_inputs(dtype, device, requires_grad=True)
         samples.extend(self.sample_inputs(dtype, device, requires_grad=False))
-        op = getattr(torch.ops, "tapp_torch").tensor_product.default
+        op = getattr(torch.ops, "tapp_torch").tensor_product
         for args in samples:
             opcheck(op, args)
 
@@ -120,7 +120,7 @@ class TestTensordot(TestCase):
                                 "test_faketensor",
                                 "test_aot_dispatch_static", 
                                 "test_aot_dispatch_dynamic"])
-    def test_opcheck_test_schema(self, dtype, device, test_utils):
+    def test_opcheck_test(self, dtype, device, test_utils):
         samples = self.sample_inputs(dtype, device, requires_grad=True)
         samples.extend(self.sample_inputs(dtype, device, requires_grad=False))
         op = getattr(torch.ops, "tapp_torch").tensordot.default

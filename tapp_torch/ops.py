@@ -7,14 +7,26 @@ __all__ = ["tensor_product","tensordot"]
 
 def tensor_product(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor, 
                    modes_A: Sequence[int], modes_B: Sequence[int], modes_C: Union[Sequence[int],None], modes_D: Sequence[int],
-                   alpha: Union[float,complex,None], beta: Union[float,complex,None]) -> None:
+                   alpha: Union[float,complex,Tensor,None], beta: Union[float,complex,Tensor,None]) -> None:
     """Performs D <- a*A*B+b*C. in an efficient fused kernel"""
     # preprocess to comply with Pytorch op schema https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#func
     #
-    # if C is None and modes_C is None:
-    #     modes_C= modes_D
+    # Under (previous) non-stable ABI Python's float and complex are mapped to C++ double and std::complex<double>
+    alpha_t, beta_t= None, None
+    if isinstance(alpha, Tensor):
+        alpha_t= alpha
+    elif isinstance(alpha, float) and not D.is_complex():
+        alpha_t= torch.tensor(alpha, dtype= torch.float64, device='cpu')
+    elif (isinstance(alpha, float) and D.is_complex()) or isinstance(alpha, complex):
+        alpha_t= torch.tensor(alpha, dtype= torch.complex128, device='cpu')
+    if isinstance(beta, Tensor):
+        beta_t= beta
+    elif isinstance(beta, float) and not D.is_complex():
+        beta_t= torch.tensor(beta, dtype= torch.float64, device='cpu')
+    elif (isinstance(beta, float) and D.is_complex()) or isinstance(beta, complex):
+        beta_t= torch.tensor(beta, dtype= torch.complex128, device='cpu')
     return torch.ops.tapp_torch.tensor_product.default(A,B,C,D,
-        modes_A,modes_B,modes_C,modes_D,alpha,beta)
+        modes_A,modes_B,modes_C,modes_D,alpha_t,beta_t)
 
 
 # NOTE signature for contracted_modes is not supported by torch custom_op 
@@ -170,7 +182,7 @@ def _backward_tensordot(ctx, grad_D):
         for n,i in enumerate(cidx_fwd_a): modes_gA[i]= modes_B[cidx_fwd_b[n]]
 
         grad_A= torch.empty_like(A) if A is not None else torch.empty(shape_A, dtype=grad_D.dtype, device=grad_D.device)
-        tensor_product(grad_D, B, None, grad_A, modes_gD, modes_B, None, modes_gA,
+        tensor_product(grad_D, B.conj(), None, grad_A, modes_gD, modes_B, None, modes_gA,
                    alpha=1.0, beta=0.0)
 
     if ctx.needs_input_grad[1]:
@@ -189,7 +201,7 @@ def _backward_tensordot(ctx, grad_D):
         for n,i in enumerate(cidx_fwd_b): modes_gB[i]= modes_A[cidx_fwd_a[n]]
 
         grad_B= torch.empty_like(B) if B is not None else torch.empty(shape_B, dtype=grad_D.dtype, device=grad_D.device)
-        tensor_product(A, grad_D, None, grad_B, modes_A, modes_gD, None, modes_gB,
+        tensor_product(A.conj(), grad_D, None, grad_B, modes_A, modes_gD, None, modes_gB,
                    alpha=1.0, beta=0.0)
 
     return grad_A, grad_B, None, None, None

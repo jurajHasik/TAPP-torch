@@ -2,7 +2,7 @@
 
 [TAPP interface](https://github.com/TAPPorg/tensor-interfaces) as (composable) PyTorch operator extension via [Stable ABI](https://docs.pytorch.org/cppdocs/stable.html#torch-stable-api)
 
-For general binary tensory contraction plus addition $D= \alpha AB + \beta C$
+For general binary tensor contraction plus addition $D= \alpha AB + \beta C$
 
 ````python
 tapp_torch.ops.tensor_product(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor, 
@@ -64,10 +64,6 @@ For tensordot subset, including gradients and torch.compile
 ```bash
 pytest tests/test_tapp_torch.py::TestTensordot -s
 ```
-
-
-This will run the unit tests defined in `test_custom_op.py` to ensure the correctness of the operator's functionality.
-
 
 ## Requirements
 

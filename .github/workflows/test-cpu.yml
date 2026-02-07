@@ -1,0 +1,64 @@
+name: Test TAPP-Torch
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-cpu:
+    name: CPU-TBLIS
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+        pytorch-version: ["2.10",]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake autoconf automake libtool \
+            ninja-build g++-14 liblapack-dev
+
+      - name: Build TAPP with TBLIS (CPU only)
+        run: |
+          mkdir -p third_party/tapp/build
+          cd third_party/tapp/build
+          cmake \
+            -DTAPP_REFERENCE_BUILD_CUTENSOR_BINDS=OFF \
+            -DTAPP_REFERENCE_ENABLE_TBLIS=ON \
+            -DTAPP_REFERENCE_TBLIS_SOURCE_DIR=../../tblis \
+            ..
+          make -j$(nproc)
+
+      - name: Install PyTorch and deps
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy pytest expecttest
+
+      - name: Install TAPP-Torch
+        env:
+          USE_CUDA: "0"
+        run: |
+          pip install --no-build-isolation -e .
+
+      - name: Run tensor_product tests
+        run: |
+          pytest tests/test_tapp_torch.py::TestTensorProduct -s -v
+
+      - name: Run tensordot tests
+        run: |
+          pytest tests/test_tapp_torch.py::TestTensordot -s -v

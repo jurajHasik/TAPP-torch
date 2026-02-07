@@ -45,6 +45,7 @@ def tensor_product(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
 def tensordot(A: Tensor, B: Tensor, contracted_modes_A: List[int], contracted_modes_B: List[int],
               modes_out: Optional[List[int]]=None) -> Tensor:
     """
+
     Performs standard tensordot contraction between A and B over the specified modes.
     [See https://docs.pytorch.org/docs/stable/generated/torch.tensordot.html]
 
@@ -104,37 +105,6 @@ def _(A, B, contracted_modes_A, contracted_modes_B, modes_out=None):
     # Create an output tensor with the computed shape
     D = torch.empty(output_shape, dtype=A.dtype, device=A.device)
     return D
-
-
-# @torch.library.register_fake("tapp_torch::tensor_product")
-# def _(A, B, C, D, modes_A, modes_B, modes_C, modes_D, alpha, beta):
-#     torch._check(A.dtype == B.dtype and A.dtype == D.dtype)
-#     torch._check(A.device == B.device and A.device == D.device)
-#     if C:
-#         torch._check(C.shape == D.shape)
-#         torch._check(C.dtype == D.dtype)
-#         torch._check(C.device == D.device)
-#     return None
-
-
-# def _backward(ctx, grad):
-#     a, b = ctx.saved_tensors
-#     grad_a, grad_b = None, None
-#     if ctx.needs_input_grad[0]:
-#         grad_a = torch.ops.extension_cpp_stable.mymul.default(grad, b)
-#     if ctx.needs_input_grad[1]:
-#         grad_b = torch.ops.extension_cpp_stable.mymul.default(grad, a)
-#     return grad_a, grad_b, None
-
-
-# def _setup_context(ctx, inputs, output):
-#     a, b, c = inputs
-#     saved_a, saved_b = None, None
-#     if ctx.needs_input_grad[0]:
-#         saved_b = b
-#     if ctx.needs_input_grad[1]:
-#         saved_a = a
-#     ctx.save_for_backward(saved_a, saved_b)
 
 def _backward_tensordot(ctx, grad_D):
     """

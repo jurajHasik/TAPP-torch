@@ -1,34 +1,20 @@
-#include <Python.h>
-
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/macros/Macros.h>
-#include <tapp.h>
+
+#include <cutensor.h>
+#include <cuda_runtime.h>
+#include <cutensor_bind.h>
+
+// Force debug info for tensor_info struct
+static volatile struct tensor_info* _dbg_tensor_info_dummy = nullptr;
+
 #include <complex>
 // #include <stdexcept>
 #include <vector>
 #include <string>
-
-extern "C" {
-  /* Creates a dummy empty _C module that can be imported from Python.
-     The import from Python will load the .so consisting of this file
-     in this extension, so that the STABLE_TORCH_LIBRARY static initializers
-     below are run. */
-  PyObject* PyInit__C(void)
-  {
-      static struct PyModuleDef module_def = {
-          PyModuleDef_HEAD_INIT,
-          "_C",   /* name of module */
-          NULL,   /* module documentation, may be NULL */
-          -1,     /* size of per-interpreter state of the module,
-                     or -1 if the module keeps state in global variables. */
-          NULL,   /* methods */
-      };
-      return PyModule_Create(&module_def);
-  }
-}
 
 namespace tapp_torch {
 
@@ -52,20 +38,21 @@ TAPP_datatype get_tapp_dtype(const torch::stable::Tensor& tensor) {
 }
 
 std::vector<int64_t> get_extents(const torch::stable::Tensor& tensor) {
-    auto sizes = tensor.sizes();
-    return std::vector<int64_t>(sizes.begin(), sizes.end());
+  auto sizes = tensor.sizes();
+  return std::vector<int64_t>(sizes.begin(), sizes.end());
 }
 
 std::vector<int64_t> get_strides(const torch::stable::Tensor& tensor) {
-    auto strides = tensor.strides();
-    return std::vector<int64_t>(strides.begin(), strides.end());
+  auto strides = tensor.strides();
+  return std::vector<int64_t>(strides.begin(), strides.end());
 }
 
 }
+
 
 // D <- a*A*B+b*C.
 template <typename scalar_t>
-void tensor_product_impl_cpu(
+void tensor_product_impl_cuda(
   const torch::stable::Tensor& A,
   const torch::stable::Tensor& B,
   const torch::stable::Tensor& C,
@@ -79,9 +66,9 @@ void tensor_product_impl_cpu(
 
   STD_TORCH_CHECK(A.scalar_type() == B.scalar_type() && A.scalar_type() == D.scalar_type(), 
   "All tensors must have the same dtype");
-  STD_TORCH_CHECK(A.device().type() == torch::headeronly::DeviceType::CPU);
-  STD_TORCH_CHECK(B.device().type() == torch::headeronly::DeviceType::CPU);
-  STD_TORCH_CHECK(D.device().type() == torch::headeronly::DeviceType::CPU);
+  STD_TORCH_CHECK(A.device().type() == torch::headeronly::DeviceType::CUDA);
+  STD_TORCH_CHECK(B.device().type() == torch::headeronly::DeviceType::CUDA);
+  STD_TORCH_CHECK(D.device().type() == torch::headeronly::DeviceType::CUDA);
   STD_TORCH_CHECK(static_cast<int64_t>(idx_A.size()) == A.dim(), 
       "Index vector length must match tensor A dimensions");
   STD_TORCH_CHECK(static_cast<int64_t>(idx_B.size()) == B.dim(), 
@@ -96,7 +83,7 @@ void tensor_product_impl_cpu(
     // TODO if c is provided, verify it matches output shape - d  
     STD_TORCH_CHECK(C.sizes().equals(D.sizes()));
     STD_TORCH_CHECK(C.scalar_type() == A.scalar_type(), "All tensors must have the same dtype");
-    STD_TORCH_CHECK(C.device().type() == torch::headeronly::DeviceType::CPU);
+    STD_TORCH_CHECK(C.device().type() == torch::headeronly::DeviceType::CUDA);
     STD_TORCH_CHECK(static_cast<int64_t>(idx_C->size()) == C.dim(), 
             "Index vector length must match tensor C dimensions");
   }
@@ -167,7 +154,7 @@ void tensor_product_impl_cpu(
     A.const_data_ptr(),
     B.const_data_ptr(),
     (void*)&beta,
-    C.defined() ? C.const_data_ptr() : nullptr,
+    C.defined() ? C.const_data_ptr() : D.const_data_ptr(),
     (void*)D.mutable_data_ptr()
   );
 
@@ -200,7 +187,7 @@ void tensor_product_impl_cpu(
 }
 
 // Non-templated wrapper for Python binding (alpha/beta as 0-dim tensors)
-void tensor_product_cpu(
+void tensor_product_cuda(
   const torch::stable::Tensor& A,
   const torch::stable::Tensor& B,
   const torch::stable::Tensor& C,
@@ -219,36 +206,39 @@ void tensor_product_cpu(
   // currently not available ?
   // stable ABI does not support Scalar.
   //
-  // THO_DISPATCH_FLOATING_TYPES(D.scalar_type(), "tensor_product_impl", [&] {
+  // THO_DISPATCH_FLOATING_TYPES(D.scalar_type(), "tensor_product_impl_cuda", [&] {
   //   // scalar_t is the resolved type
-  //   tensor_product_impl<scalar_type>(A, B, C, D, idx_A, idx_B, idx_C, idx_D,
+  //   tensor_product_impl_cuda<scalar_type>(A, B, C, D, idx_A, idx_B, idx_C, idx_D,
   //                                 static_cast<scalar_type>(alpha),
   //                                 static_cast<scalar_type>(beta));
   // });
+  
+  auto alpha_d = torch::stable::to(alpha_t, torch::stable::Device(torch::headeronly::DeviceType::CPU));
+  auto beta_d  = torch::stable::to(beta_t, torch::stable::Device(torch::headeronly::DeviceType::CPU));
 
-  switch (alpha_t.scalar_type()) {
+  switch (alpha_d.scalar_type()) {
       case torch::headeronly::ScalarType::Float: {
-          auto alpha = *static_cast<const float*>(alpha_t.const_data_ptr());
-          auto beta  = *static_cast<const float*>(beta_t.const_data_ptr());
-          tensor_product_impl_cpu<float>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          auto alpha = *static_cast<const float*>(alpha_d.const_data_ptr());
+          auto beta  = *static_cast<const float*>(beta_d.const_data_ptr());
+          tensor_product_impl_cuda<float>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
           break;
       }
       case torch::headeronly::ScalarType::Double: {
-          auto alpha = *static_cast<const double*>(alpha_t.const_data_ptr());
-          auto beta  = *static_cast<const double*>(beta_t.const_data_ptr());
-          tensor_product_impl_cpu<double>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          auto alpha = *static_cast<const double*>(alpha_d.const_data_ptr());
+          auto beta  = *static_cast<const double*>(beta_d.const_data_ptr());
+          tensor_product_impl_cuda<double>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
           break;
       }
       case torch::headeronly::ScalarType::ComplexFloat: {
-          auto alpha = *static_cast<const std::complex<float>*>(alpha_t.const_data_ptr());
-          auto beta  = *static_cast<const std::complex<float>*>(beta_t.const_data_ptr());
-          tensor_product_impl_cpu<std::complex<float>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          auto alpha = *static_cast<const std::complex<float>*>(alpha_d.const_data_ptr());
+          auto beta  = *static_cast<const std::complex<float>*>(beta_d.const_data_ptr());
+          tensor_product_impl_cuda<std::complex<float>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
           break;
       }
       case torch::headeronly::ScalarType::ComplexDouble: {
-          auto alpha = *static_cast<const std::complex<double>*>(alpha_t.const_data_ptr());
-          auto beta  = *static_cast<const std::complex<double>*>(beta_t.const_data_ptr());
-          tensor_product_impl_cpu<std::complex<double>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          auto alpha = *static_cast<const std::complex<double>*>(alpha_d.const_data_ptr());
+          auto beta  = *static_cast<const std::complex<double>*>(beta_d.const_data_ptr());
+          tensor_product_impl_cuda<std::complex<double>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
           break;
       }
       default:
@@ -256,17 +246,9 @@ void tensor_product_cpu(
   }
 }
 
-// Defines the operators
-// TODO consider different alpha, beta types
-STABLE_TORCH_LIBRARY(tapp_torch, m) {
-  m.def("tensor_product(Tensor a, Tensor b, Tensor c, Tensor(t!) out, "
-    "int[] modes_A, int[] modes_B, int[]? modes_C, int[] modes_out, "
-    "Tensor alpha, Tensor beta) -> ()");
-}
-
-// Registers CPU implementations
-STABLE_TORCH_LIBRARY_IMPL(tapp_torch, CPU, m) {
-  m.impl("tensor_product", TORCH_BOX(&tensor_product_cpu));
+// Registers CUDA implementation
+STABLE_TORCH_LIBRARY_IMPL(tapp_torch, CUDA, m) {
+  m.impl("tensor_product", TORCH_BOX(&tensor_product_cuda));
 }
 
 } // namespace tapp_torch

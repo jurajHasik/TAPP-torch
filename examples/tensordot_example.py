@@ -1,10 +1,29 @@
 import torch
 import tapp_torch
+import argparse
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Tensordot example with tapp_torch")
+    parser.add_argument("--device", type=str, default="cpu",
+                        help="Device to run on (default: cpu)")
+    parser.add_argument("--dtype", type=str, default="float64", 
+                        choices=["float32", "float64", "complex64", "complex128"],
+                        help="Data type (default: float64)")
+    return parser.parse_args()
+
+def get_dtype(dtype_str):
+    dtype_map = {
+        "float32": torch.float32,
+        "float64": torch.float64,
+        "complex64": torch.complex64,
+        "complex128": torch.complex128,
+    }
+    return dtype_map[dtype_str]
 
 def main():
-    device = "cpu"
-    dtype = torch.float64
+    args = parse_args()
+    device = args.device
+    dtype = get_dtype(args.dtype)
 
     A = torch.randn(3, 4, 5, device=device, dtype=dtype, requires_grad=True)
     B = torch.randn(5, 4, 2, device=device, dtype=dtype, requires_grad=True)

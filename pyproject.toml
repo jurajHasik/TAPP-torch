@@ -1,6 +1,10 @@
 [build-system]
 requires = [
   "setuptools",
-  "torch>=2.10"
+  "pytest",
+  "expecttest",
+  "numpy",
+  "torch>=2.10",
+  "cutensor>=2.5"
 ]
 build-backend = "setuptools.build_meta"

@@ -1,4 +1,3 @@
-
 import os
 import torch
 import glob
@@ -27,23 +26,18 @@ def get_extensions():
         print("Compiling in debug mode")
 
     use_cuda = use_cuda and torch.cuda.is_available() and CUDA_HOME is not None
-    extension = CUDAExtension if use_cuda else CppExtension
 
-    # Path to the tapp library built in third_party/tapp/build
     tapp_lib_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "third_party", "tapp", "build",
     )
+    tapp_include_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "third_party", "tapp", "api", "include",
+    )
+    cutensor_bind_include_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "third_party", "tapp", "cutensor_bindings",
+    )
 
-    extra_link_args = [
-        f"-L{tapp_lib_dir}",
-        f"-Wl,-rpath,{tapp_lib_dir}",
-        "-ltapp-reference",
-        # -Lpath/to/shared/objects if necessary
-    ]
-    include_dirs = [
-        "third_party/tapp/api/include",
-        # path/to/include if necessary
-    ]
+    extra_link_args = []
     extra_compile_args = {
         "cxx": [
             "-O3" if not debug_mode else "-O0",
@@ -65,8 +59,7 @@ def get_extensions():
         ],
     }
     if debug_mode:
-        extra_compile_args["cxx"].append("-g")
-        extra_compile_args["nvcc"].append("-g")
+        [ extra_compile_args[c].append("-g") for c in ["cxx", "nvcc"] ]
         extra_link_args.extend(["-O0", "-g"])
 
     this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -76,19 +69,41 @@ def get_extensions():
     extensions_cuda_dir = os.path.join(extensions_dir, "cuda")
     cuda_sources = list(glob.glob(os.path.join(extensions_cuda_dir, "*.cu")))
 
-    if use_cuda:
-        sources += cuda_sources
+    ext_modules = []
 
-    ext_modules = [
-        extension(
+    # CPU extension — links against libtapp-reference only
+    ext_modules.append(
+        CppExtension(
             f"{library_name}._C",
             sources,
-            include_dirs=include_dirs,
-            extra_compile_args=extra_compile_args,
-            extra_link_args=extra_link_args,
+            include_dirs=[tapp_include_dir],
+            extra_compile_args=extra_compile_args["cxx"],
+            extra_link_args=extra_link_args+[
+                f"-L{tapp_lib_dir}",
+                f"-Wl,-rpath,{tapp_lib_dir}",
+                "-ltapp-reference",
+            ],
             py_limited_api=py_limited_api,
         )
-    ]
+    )
+
+    # CUDA extension — links against libcutensor_binds only (NOT libtapp-reference)
+    if use_cuda:
+        if cuda_sources:
+            ext_modules.append(
+                CUDAExtension(
+                    f"{library_name}._C_cuda",
+                    cuda_sources,
+                    include_dirs=[tapp_include_dir, cutensor_bind_include_dir],
+                    extra_compile_args=extra_compile_args,
+                    extra_link_args=extra_link_args+[
+                        f"-L{tapp_lib_dir}",
+                        f"-Wl,-rpath,{tapp_lib_dir}",
+                        "-lcutensor_binds",
+                    ],
+                    py_limited_api=py_limited_api,
+                )
+            )
 
     return ext_modules
 

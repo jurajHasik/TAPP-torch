@@ -7,6 +7,7 @@ from torch.testing._internal.common_utils import (
 )
 from torch.testing._internal.optests import opcheck
 
+DTYPE_OPTIONS= [torch.float32, torch.float64, torch.complex64, torch.complex128]
 
 def reference_tensor_product(a, b, c, d,
                              modes_a, modes_b, modes_c, modes_d,
@@ -40,8 +41,8 @@ class TestTensorProduct(TestCase):
             [make_tensor(3,3), make_tensor(3,3), None, make_tensor(3,3), [0,1], [1,2], None, [0,2], make_tensor(), 0*make_tensor()],
         ]
 
-    @parametrize("device", ["cpu",])
-    @parametrize("dtype", [torch.float64,])
+    @parametrize("device", ["cpu","cuda"] if torch.cuda.is_available() else ["cpu",])
+    @parametrize("dtype", DTYPE_OPTIONS)
     def test_correctness(self, dtype, device):
         samples = self.sample_inputs(dtype,device)
         for args in samples:
@@ -64,8 +65,8 @@ class TestTensorProduct(TestCase):
 
     #         torch.testing.assert_close(result, expected)
 
-    @parametrize("device", ["cpu",])
-    @parametrize("dtype", [torch.float64,])
+    @parametrize("device", ["cpu","cuda"] if torch.cuda.is_available() else ["cpu",])
+    @parametrize("dtype", DTYPE_OPTIONS)
     def test_opcheck(self, dtype, device):
         samples = self.sample_inputs(dtype, device, requires_grad=True)
         samples.extend(self.sample_inputs(dtype, device, requires_grad=False))
@@ -104,8 +105,8 @@ class TestTensordot(TestCase):
             [make_tensor(2,3,5).conj(), make_tensor(2,3,4,5).conj(), [2,0], [3,0], [2,1,0]],
         ]
 
-    @parametrize("device", ["cpu",])
-    @parametrize("dtype", [torch.float64,torch.complex128])
+    @parametrize("device", ["cpu","cuda"] if torch.cuda.is_available() else ["cpu",])
+    @parametrize("dtype", DTYPE_OPTIONS)
     def test_correctness(self, dtype, device):
         samples = self.sample_inputs(dtype,device)
         for args in samples:
@@ -113,8 +114,8 @@ class TestTensordot(TestCase):
             expected = reference_tensordot(*args)
             torch.testing.assert_close(result, expected)
 
-    @parametrize("device", ["cpu",])
-    @parametrize("dtype", [torch.float64,torch.complex128])
+    @parametrize("device", ["cpu","cuda"] if torch.cuda.is_available() else ["cpu",])
+    @parametrize("dtype", DTYPE_OPTIONS)
     @parametrize("test_utils", ["test_schema",
                                 "test_autograd_registration",
                                 "test_faketensor",
@@ -127,8 +128,8 @@ class TestTensordot(TestCase):
         for args in samples:
             opcheck(op, args, test_utils=test_utils)
 
-    @parametrize("device", ["cpu",])
-    @parametrize("dtype", [torch.float64,torch.complex128])
+    @parametrize("device", ["cpu","cuda"] if torch.cuda.is_available() else ["cpu",])
+    @parametrize("dtype", DTYPE_OPTIONS)
     def test_gradients(self, dtype, device):
         samples = self.sample_inputs(dtype, device, requires_grad=True)
         for args in samples:

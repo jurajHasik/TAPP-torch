@@ -213,10 +213,12 @@ void tensor_product_cuda(
   //                                 static_cast<scalar_type>(beta));
   // });
   
-  auto alpha_d = torch::stable::to(alpha_t, torch::stable::Device(torch::headeronly::DeviceType::CPU));
-  auto beta_d  = torch::stable::to(beta_t, torch::stable::Device(torch::headeronly::DeviceType::CPU));
+  auto alpha_d = torch::stable::to(alpha_t, D.scalar_type(), std::nullopt, 
+    torch::stable::Device(torch::headeronly::DeviceType::CPU));
+  auto beta_d  = torch::stable::to(beta_t, D.scalar_type(), std::nullopt, 
+    torch::stable::Device(torch::headeronly::DeviceType::CPU));
 
-  switch (alpha_d.scalar_type()) {
+  switch (D.scalar_type()) {
       case torch::headeronly::ScalarType::Float: {
           auto alpha = *static_cast<const float*>(alpha_d.const_data_ptr());
           auto beta  = *static_cast<const float*>(beta_d.const_data_ptr());

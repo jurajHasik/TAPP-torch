@@ -226,28 +226,32 @@ void tensor_product_cpu(
   //                                 static_cast<scalar_type>(beta));
   // });
 
-  switch (alpha_t.scalar_type()) {
+  // NOTE: currently, we assume alpha, beta are double or complex double due to how scalars are mapped 
+  //       from python to C++ equivalents. Downcast to desired necessary precision 
+  auto alpha_tt = torch::stable::to(alpha_t, D.scalar_type());
+  auto beta_tt = torch::stable::to(beta_t, D.scalar_type());
+  switch (D.scalar_type()) {
       case torch::headeronly::ScalarType::Float: {
-          auto alpha = *static_cast<const float*>(alpha_t.const_data_ptr());
-          auto beta  = *static_cast<const float*>(beta_t.const_data_ptr());
+          auto alpha = *static_cast<const float*>(alpha_tt.const_data_ptr());
+          auto beta  = *static_cast<const float*>(beta_tt.const_data_ptr());
           tensor_product_impl_cpu<float>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
           break;
       }
       case torch::headeronly::ScalarType::Double: {
-          auto alpha = *static_cast<const double*>(alpha_t.const_data_ptr());
-          auto beta  = *static_cast<const double*>(beta_t.const_data_ptr());
+          auto alpha = *static_cast<const double*>(alpha_tt.const_data_ptr());
+          auto beta  = *static_cast<const double*>(beta_tt.const_data_ptr());
           tensor_product_impl_cpu<double>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
           break;
       }
       case torch::headeronly::ScalarType::ComplexFloat: {
-          auto alpha = *static_cast<const std::complex<float>*>(alpha_t.const_data_ptr());
-          auto beta  = *static_cast<const std::complex<float>*>(beta_t.const_data_ptr());
+          auto alpha = *static_cast<const std::complex<float>*>(alpha_tt.const_data_ptr());
+          auto beta  = *static_cast<const std::complex<float>*>(beta_tt.const_data_ptr());
           tensor_product_impl_cpu<std::complex<float>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
           break;
       }
       case torch::headeronly::ScalarType::ComplexDouble: {
-          auto alpha = *static_cast<const std::complex<double>*>(alpha_t.const_data_ptr());
-          auto beta  = *static_cast<const std::complex<double>*>(beta_t.const_data_ptr());
+          auto alpha = *static_cast<const std::complex<double>*>(alpha_tt.const_data_ptr());
+          auto beta  = *static_cast<const std::complex<double>*>(beta_tt.const_data_ptr());
           tensor_product_impl_cpu<std::complex<double>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
           break;
       }

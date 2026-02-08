@@ -69,6 +69,10 @@ def get_extensions():
     extensions_cuda_dir = os.path.join(extensions_dir, "cuda")
     cuda_sources = list(glob.glob(os.path.join(extensions_cuda_dir, "*.cu")))
 
+    # Convert absolute paths to relative (required for editable installs)
+    sources = [os.path.relpath(s, this_dir) for s in sources]
+    cuda_sources = [os.path.relpath(s, this_dir) for s in cuda_sources]
+
     ext_modules = []
 
     # CPU extension — links against libtapp-reference only
@@ -109,17 +113,8 @@ def get_extensions():
 
 
 setup(
-    name=library_name,
-    version="0.0.1",
     packages=find_packages(),
     ext_modules=get_extensions(),
-    install_requires=["torch>=2.10.0"],
-    description="TAPP extension for PyTorch using Stable ABI",
-    long_description=open(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "README.md")
-    ).read(),
-    long_description_content_type="text/markdown",
-    url="",
     cmdclass={"build_ext": BuildExtension},
     options={"bdist_wheel": {"py_limited_api": "cp39"}} if py_limited_api else {},
 )

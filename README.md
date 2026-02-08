@@ -27,8 +27,7 @@ Get dependencies  `TAPP`, [`TBLIS`](https://github.com/MatthewsResearchGroup/tbl
 ``` 
 git submodule update --init --recursive
 ```
-Get [`cuTensor`](https://developer.nvidia.com/cutensor).
-
+Get [`cuTensor`](https://developer.nvidia.com/cutensor), i.e. via `pip`, see [`cutensor-cu<XX>`](https://pypi.org/search/?q=cutensor).
 
 Next, build TAPP with (optionally) `TBLIS` and (optionally) `cuTensor`, here with CMake.
 
@@ -58,6 +57,12 @@ pip install --no-build-isolation -e .
 
 To run the tests for the custom operators:
 
+First, get optional deps, here from `pyproject.toml`
+
+```bash
+pip install --no-build-isolation -e ".[tests]"
+```
+
 For TAPP's general `tensor_product`
 
 ```bash
@@ -69,6 +74,10 @@ For `tensordot` subset, including gradients and torch.compile
 ```bash
 pytest tests/test_tapp_torch.py::TestTensordot -s
 ```
+
+## Performance benchmarks
+
+See `benchmarks` folder.
 
 ### Requirements
 

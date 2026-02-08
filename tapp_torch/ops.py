@@ -1,9 +1,11 @@
 from typing import List, Optional, Sequence, Tuple, Union
 import torch
+import os
 from torch import Tensor
 
-__all__ = ["tensor_product","tensordot"]
 
+__all__ = ["tensor_product","tensordot"]
+TAPP_LOG_LEVEL = int(os.environ.get('TAPP_LOG_LEVEL', '0'))
 
 def tensor_product(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor, 
                    modes_A: Sequence[int], modes_B: Sequence[int], modes_C: Union[Sequence[int],None], modes_D: Sequence[int],
@@ -25,8 +27,13 @@ def tensor_product(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
         beta_t= torch.tensor(beta, dtype= torch.float64, device='cpu')
     elif (isinstance(beta, float) and D.is_complex()) or isinstance(beta, complex):
         beta_t= torch.tensor(beta, dtype= torch.complex128, device='cpu')
-    return torch.ops.tapp_torch.tensor_product.default(A,B,C,D,
+    
+    if TAPP_LOG_LEVEL > 5:
+        torch.cuda.nvtx.range_push(f"TAPP_tensor_product_{list(A.shape)}x{list(A.shape)}+{list(C.shape if C else [])}->{list(D.shape)}")
+    torch.ops.tapp_torch.tensor_product.default(A,B,C,D,
         modes_A,modes_B,modes_C,modes_D,alpha_t,beta_t)
+    if TAPP_LOG_LEVEL > 5:
+        torch.cuda.nvtx.range_pop()
 
 
 # NOTE signature for contracted_modes is not supported by torch custom_op 

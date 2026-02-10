@@ -94,13 +94,24 @@ def find_contraction_path(
     -------
     tree : cotengra.ContractionTree
     """
-    opt = ctg.HyperOptimizer(
-        methods=[optimize] if optimize != "auto" else None,
-        max_repeats=max_repeats,
-        minimize='flops', max_time=None, parallel=False, 
-        simulated_annealing_opts=None, slicing_opts=None, slicing_reconf_opts=None, 
-        reconf_opts=None, optlib=None, space=None, score_compression=0.75, 
-        on_trial_error='warn', max_training_steps=None, progbar=False, )
+    if "opt_einsum:" in optimize:
+        import opt_einsum as oe
+        optimize = optimize.split("opt_einsum:")[1]
+        if optimize == "dp":
+            opt = oe.DynamicProgramming(
+                minimize='flops',   # set to 'size' to optimize for largest intermediate tensor size
+                search_outer=False, # search through outer products as well
+                cost_cap=True,      # don't use cost-capping strategy
+            )
+    else:
+        opt = ctg.HyperOptimizer(
+            methods=[optimize] if optimize != "auto" else None,
+            max_repeats=max_repeats,
+            minimize='flops', max_time=None, parallel=False, 
+            simulated_annealing_opts=None, slicing_opts=None, slicing_reconf_opts=None, 
+            reconf_opts=None, optlib=None, space=None, score_compression=0.75, 
+            on_trial_error='warn', max_training_steps=None, progbar=False, )
+        
     tree= ctg.array_contract_tree(inputs, output, size_dict, shapes=None, 
         optimize=opt, canonicalize=True, sort_contraction_indices=False)
     return tree
@@ -185,6 +196,31 @@ def bench_tapp(tree, arrays, *, n_runs: int = 10):
     return times
 
 
+def bench_tapp_compile(tree, arrays, *, n_runs: int = 10):
+    """Benchmark using tapp_torch backend via cotengra + autoray."""
+    
+    f_run= lambda *arrays : tree.contract(arrays, order=None, prefer_einsum=False, strip_exponent=False, 
+            check_zero=False, backend=BACKEND_TAPP, implementation=None, autojit=False, progbar=False)
+    f_run_compiled= torch.compile(f_run)
+    def run():
+        return f_run_compiled(*arrays)
+
+    # invoke once to trigger
+    run()
+
+    times = []
+    for _ in range(n_runs):
+        _warmup(arrays)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        run()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        times.append(time.perf_counter() - t0)
+    return times
+
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
@@ -253,8 +289,8 @@ def parse_args():
         help="Number of timed iterations (default: 20)",
     )
     p.add_argument(
-        "--optimizer", type=str, default="auto",
-        help="cotengra optimizer method (default: auto)",
+        "--optimizer", type=str, default="opt_einsum:dp",
+        help="cotengra optimizer method (default: opt_einsum:dp)",
     )
     p.add_argument(
         "--max-repeats", type=int, default=128,
@@ -302,6 +338,7 @@ def main():
     )
     print(tree.contract_stats())
     tree.print_contractions()
+    # import pdb; pdb.set_trace()
     print()
 
     # 4. Create tensors
@@ -315,9 +352,12 @@ def main():
         report("torch", times_torch)
 
     if not args.skip_tapp:
-        _warpup_tapp(dtype,device)
+        _warpup_tapp(dtype,device) # to trigger loading of tapp_torch chain and avoid counting it in the benchmark
         times_tapp = bench_tapp(tree, arrays, n_runs=args.n_runs)
         report("tapp_torch", times_tapp)
+
+        times_tapp_c = bench_tapp_compile(tree, arrays, n_runs=args.n_runs)
+        report("tapp_torch_compile", times_tapp_c)
 
     # 6. Verify correctness (optional quick check)
     if args.verify:

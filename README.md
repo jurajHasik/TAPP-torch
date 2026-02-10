@@ -38,7 +38,7 @@ NOTE: If no TBLIS_SOURCE_DIR is provided, TAPP's CMake checkouts TBLIS
 
 ```bash
 mkdir third-party/tapp/build && cd third-party/tapp/build
-cmake -DTAPP_REFERENCE_BUILD_CUTENSOR_BINDS=ON -DTAPP_REFERENCE_ENABLE_TBLIS=ON \
+cmake -DTAPP_REFERENCE_BUILD_CUTENSOR_BINDINGS=ON -DTAPP_REFERENCE_ENABLE_TBLIS=ON \
     -DTAPP_REFERENCE_TBLIS_SOURCE_DIR=../../tblis ..
 make -j <number-of-cores>
 ```

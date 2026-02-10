@@ -33,7 +33,10 @@ def get_extensions():
     tapp_include_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "third_party", "tapp", "api", "include",
     )
-    cutensor_bind_include_dir = os.path.join(
+    tapp_cutensor_lib_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "third_party", "tapp", "build", "cutensor_bindings",
+    )
+    tapp_cutensor_include_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "third_party", "tapp", "cutensor_bindings",
     )
 
@@ -98,12 +101,12 @@ def get_extensions():
                 CUDAExtension(
                     f"{library_name}._C_cuda",
                     cuda_sources,
-                    include_dirs=[tapp_include_dir, cutensor_bind_include_dir],
+                    include_dirs=[tapp_include_dir, tapp_cutensor_include_dir],
                     extra_compile_args=extra_compile_args,
                     extra_link_args=extra_link_args+[
-                        f"-L{tapp_lib_dir}",
-                        f"-Wl,-rpath,{tapp_lib_dir}",
-                        "-lcutensor_binds",
+                        f"-L{tapp_cutensor_lib_dir}",
+                        f"-Wl,-rpath,{tapp_cutensor_lib_dir}",
+                        "-lcutensor_bindings",
                     ],
                     py_limited_api=py_limited_api,
                 )

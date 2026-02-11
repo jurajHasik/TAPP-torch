@@ -4,7 +4,7 @@ import os
 from torch import Tensor
 
 
-__all__ = ["tensor_product","tensordot"]
+__all__ = ["tensor_product","tensordot","tensor_product_bs"]
 TAPP_LOG_LEVEL = int(os.environ.get('TAPP_LOG_LEVEL', '0'))
 
 def tensor_product(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor, 
@@ -205,3 +205,41 @@ torch.library.register_autograd(
     "tapp_torch::tensordot", _backward_tensordot, setup_context=_setup_context_tensordot)
 
 
+def tensor_product_bs(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor, 
+        a_modes: Sequence[int], a_numSectionsPerMode: Sequence[int], a_sectionExtents: Sequence[int], 
+        a_blocks: Sequence[int], a_strides:  Sequence[int], a_offsets: Sequence[int],
+        b_modes: Sequence[int], b_numSectionsPerMode: Sequence[int], b_sectionExtents: Sequence[int], 
+        b_blocks: Sequence[int], b_strides:  Sequence[int], b_offsets: Sequence[int],
+        c_modes: Union[Sequence[int],None], c_numSectionsPerMode: Union[Sequence[int],None], c_sectionExtents: Union[Sequence[int],None], 
+        c_blocks: Union[Sequence[int],None], c_strides: Union[Sequence[int],None], c_offsets: Union[Sequence[int],None],
+        d_modes: Sequence[int], d_numSectionsPerMode:  Sequence[int], d_sectionExtents: Sequence[int], 
+        d_blocks: Sequence[int], d_strides:  Sequence[int], d_offsets: Sequence[int],
+        alpha: Union[float,complex,Tensor,None], beta: Union[float,complex,Tensor,None]) -> None:
+    """Performs D <- a*A*B+b*C over block-sparse tensors in an efficient fused kernel"""
+    # preprocess to comply with Pytorch op schema https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#func
+    #
+    # Under (previous) non-stable ABI Python's float and complex are mapped to C++ double and std::complex<double>
+    alpha_t, beta_t= None, None
+    if isinstance(alpha, Tensor):
+        alpha_t= alpha
+    elif isinstance(alpha, float) and not D.is_complex():
+        alpha_t= torch.tensor(alpha, dtype= torch.float64, device='cpu')
+    elif (isinstance(alpha, float) and D.is_complex()) or isinstance(alpha, complex):
+        alpha_t= torch.tensor(alpha, dtype= torch.complex128, device='cpu')
+    if isinstance(beta, Tensor):
+        beta_t= beta
+    elif isinstance(beta, float) and not D.is_complex():
+        beta_t= torch.tensor(beta, dtype= torch.float64, device='cpu')
+    elif (isinstance(beta, float) and D.is_complex()) or isinstance(beta, complex):
+        beta_t= torch.tensor(beta, dtype= torch.complex128, device='cpu')
+    
+    if TAPP_LOG_LEVEL > 5:
+        torch.cuda.nvtx.range_push(f"TAPP_tensor_product_bs")
+    torch.ops.tapp_torch.tensor_product_bs.default(A,B,C,D,
+        a_modes, a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets,
+        b_modes, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
+        c_modes, c_numSectionsPerMode, c_sectionExtents, c_blocks, c_strides, c_offsets,
+        d_modes, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets,
+        alpha_t,beta_t)
+    if TAPP_LOG_LEVEL > 5:
+        torch.cuda.nvtx.range_pop()

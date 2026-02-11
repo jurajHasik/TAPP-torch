@@ -266,6 +266,12 @@ STABLE_TORCH_LIBRARY(tapp_torch, m) {
   m.def("tensor_product(Tensor a, Tensor b, Tensor c, Tensor(t!) out, "
     "int[] modes_A, int[] modes_B, int[]? modes_C, int[] modes_out, "
     "Tensor alpha, Tensor beta) -> ()");
+  m.def("tensor_product_bs(Tensor a, Tensor b, Tensor c, Tensor(t!) out, "
+    "int[] a_modes, int[] a_numSectionsPerMode, int[] a_sectionExtents, int[] a_blocks, int[] a_strides, int[] a_offsets, "
+    "int[] b_modes, int[] b_numSectionsPerMode, int[] b_sectionExtents, int[] b_blocks, int[] b_strides, int[] b_offsets, "
+    "int[]? c_modes, int[]? c_numSectionsPerMode, int[]? c_sectionExtents, int[]? c_blocks, int[]? c_strides, int[]? c_offsets, "
+    "int[] d_modes, int[] d_numSectionsPerMode, int[] d_sectionExtents, int[] d_blocks, int[] d_strides, int[] d_offsets, "
+    "Tensor alpha, Tensor beta) -> ()");
 }
 
 // Registers CPU implementations

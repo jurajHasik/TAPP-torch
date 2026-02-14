@@ -1,8 +1,10 @@
 # TAPP extension for PyTorch
 
+## Dense tensors
+
 [TAPP interface](https://github.com/TAPPorg/tensor-interfaces) as (composable) PyTorch operator extension via [Stable ABI](https://docs.pytorch.org/cppdocs/stable.html#torch-stable-api)
 
-For general binary tensor contraction plus addition $D= \alpha AB + \beta C$
+For general binary **dense** tensor contraction plus addition $D= \alpha AB + \beta C$
 
 ````python
 tapp_torch.ops.tensor_product(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor, 
@@ -16,6 +18,37 @@ and a tensordot subset with autograd and torch.compile support
 tapp_torch.ops.tensordot(A: Tensor, B: Tensor, 
     contracted_modes_A: List[int], contracted_modes_B: List[int],
     modes_out: Optional[List[int]]=None) -> Tensor:
+````
+
+## Block-sparse tensors
+
+For general binary block-sparse tensor contraction plus addition $D= \alpha AB + \beta C$
+
+````python
+tapp_torch.ops.tensor_product_bs(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor, 
+        a_modes: Sequence[int], a_numSectionsPerMode: Sequence[int], a_sectionExtents: Sequence[int], 
+        a_blocks: Sequence[int], a_strides:  Sequence[int], a_offsets: Sequence[int],
+        b_modes: Sequence[int], b_numSectionsPerMode: Sequence[int], b_sectionExtents: Sequence[int], 
+        b_blocks: Sequence[int], b_strides:  Sequence[int], b_offsets: Sequence[int],
+        c_modes: Union[Sequence[int],None], c_numSectionsPerMode: Union[Sequence[int],None], c_sectionExtents: Union[Sequence[int],None], 
+        c_blocks: Union[Sequence[int],None], c_strides: Union[Sequence[int],None], c_offsets: Union[Sequence[int],None],
+        d_modes: Sequence[int], d_numSectionsPerMode:  Sequence[int], d_sectionExtents: Sequence[int], 
+        d_blocks: Sequence[int], d_strides:  Sequence[int], d_offsets: Sequence[int],
+        alpha: Union[float,complex,Tensor,None], beta: Union[float,complex,Tensor,None]) -> None:
+````
+
+and a tensordot subset with autograd. **torch.compile is currently not supported.**
+
+````python
+tapp_torch.ops.tensordot_bs(A: Tensor, B: Tensor,
+        contracted_modes_A: Sequence[int], contracted_modes_B: Sequence[int],
+        a_numSectionsPerMode: Sequence[int], a_sectionExtents: Sequence[int], 
+        a_blocks: Sequence[int], a_strides:  Sequence[int], a_offsets: Sequence[int],
+        b_numSectionsPerMode: Sequence[int], b_sectionExtents: Sequence[int], 
+        b_blocks: Sequence[int], b_strides:  Sequence[int], b_offsets: Sequence[int],
+        d_numSectionsPerMode:  Sequence[int], d_sectionExtents: Sequence[int], 
+        d_blocks: Sequence[int], d_strides:  Sequence[int], d_offsets: Sequence[int], 
+        modes_out: Optional[Sequence[int]]=None) -> Tensor:
 ````
 
 Requires Pytorch 2.10+
@@ -63,6 +96,8 @@ First, get optional deps, here from `pyproject.toml`
 pip install --no-build-isolation -e ".[tests]"
 ```
 
+### Dense tensors
+
 For TAPP's general `tensor_product`
 
 ```bash
@@ -73,6 +108,18 @@ For `tensordot` subset, including gradients and torch.compile
 
 ```bash
 pytest tests/test_tapp_torch.py::TestTensordot -s
+```
+
+### Block-sparse tensors
+
+```bash
+pytest tests/test_tapp_torch.py::TestTensorProductBs -s
+```
+
+For `tensordot` subset, including gradients but **without torch.compile**
+
+```bash
+pytest tests/test_tapp_torch.py::TestTensordotBs -s
 ```
 
 ## Performance benchmarks

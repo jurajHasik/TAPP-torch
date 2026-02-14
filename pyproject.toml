@@ -1,6 +1,8 @@
 [build-system]
 requires = [
   "setuptools",
+  "hatchling",
+  "hatch-vcs",
   "torch>=2.10",
   # cutensor must be pre-installed
 ]
@@ -23,10 +25,12 @@ cu13 = ["cutensor-cu13>=2.5"]
 tests = [
   "pytest",
   "expecttest",
+  "symmray @ git+https://github.com/jcmgray/symmray.git"
 ]
 benchmarks = [
   "cotengra",
   "opt_einsum",
+  "symmray @ git+https://github.com/jcmgray/symmray.git",
   "autoray",
   "cmaes", 
   "cotengrust", 

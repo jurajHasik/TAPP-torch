@@ -144,7 +144,6 @@ inline cutensorComputeDescriptor_t to_cuda_compute_desc(torch::headeronly::Scala
 
 void wrap_BlockSparseTensorDescriptor(
     cutensorHandle_t& handle,
-    const size_t& nmodes,                           // number of modes
     const std::vector<int64_t>& numSectionsPerMode, // number of sections per mode     
     const std::vector<int64_t>& sectionExtents,     // extents of the sections in modes of the tensor, 
                                                     // linearized from first mode first section to last mode last section
@@ -156,10 +155,11 @@ void wrap_BlockSparseTensorDescriptor(
 ) {
   std::vector<uint32_t> nSectionsPerMode_u32(numSectionsPerMode.begin(), numSectionsPerMode.end());
   std::vector<int32_t> blocks_u32(blocks.begin(), blocks.end());
+  uint32_t nModes = static_cast<uint32_t>(numSectionsPerMode.size());
+  uint64_t nBlocks = static_cast<uint64_t>(blocks.size() / numSectionsPerMode.size());
   HANDLE_ERROR(cutensorCreateBlockSparseTensorDescriptor(
         handle, &desc,
-        static_cast<uint32_t>(nmodes), 
-        static_cast<uint64_t>(blocks_u32.size()), 
+        nModes, nBlocks, 
         nSectionsPerMode_u32.data(), 
         sectionExtents.data(),
         blocks_u32.data(), 
@@ -233,13 +233,13 @@ void tensor_product_bs_cuda_impl(
   // Get descriptors
   cutensorBlockSparseTensorDescriptor_t a_desc, b_desc, c_desc, d_desc;
   wrap_BlockSparseTensorDescriptor(
-    handle, a_modes_32.size(), a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, 
+    handle, a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, 
     dtype, a_desc);
   wrap_BlockSparseTensorDescriptor(
-    handle, b_modes_32.size(), b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, 
+    handle, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, 
     dtype, b_desc);
   wrap_BlockSparseTensorDescriptor(
-    handle, d_modes_32.size(), d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, 
+    handle, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, 
     dtype, d_desc);
   if (C.has_value()) {
     STD_TORCH_CHECK(c_modes.has_value() && c_numSectionsPerMode.has_value() 
@@ -247,7 +247,7 @@ void tensor_product_bs_cuda_impl(
       "If C is defined, all of c_modes, c_numSectionsPerMode, c_sectionExtents, c_blocks, and c_strides must be provided");
     c_modes_32 = std::vector<int32_t>(c_modes->begin(), c_modes->end());
     wrap_BlockSparseTensorDescriptor(
-        handle, c_modes_32.size(), c_numSectionsPerMode.value(), c_sectionExtents.value(), 
+        handle, c_numSectionsPerMode.value(), c_sectionExtents.value(), 
         c_blocks.value(), c_strides.value(), dtype, c_desc);
   } else {
     c_modes_32 = d_modes_32;
@@ -260,11 +260,21 @@ void tensor_product_bs_cuda_impl(
 
   // Create contraction descriptor
   cutensorOperationDescriptor_t contractionDesc;
+  // HANDLE_ERROR(cutensorCreateBlockSparseContraction(
+  //     handle, &contractionDesc,
+  //     a_desc, a_modes_32.data(), CUTENSOR_OP_IDENTITY,
+  //     b_desc, b_modes_32.data(), CUTENSOR_OP_IDENTITY,
+  //     c_desc, c_modes_32.data(), CUTENSOR_OP_IDENTITY,
+  //     d_desc, d_modes_32.data(),
+  //     computeDesc
+  // ));
+  // NOTE See https://docs.nvidia.com/cuda/cutensor/latest/api/cutensor.html#cutensorcreateblocksparsecontractiondescriptor
+  //      for current API limitations 
   HANDLE_ERROR(cutensorCreateBlockSparseContraction(
       handle, &contractionDesc,
       a_desc, a_modes_32.data(), CUTENSOR_OP_IDENTITY,
       b_desc, b_modes_32.data(), CUTENSOR_OP_IDENTITY,
-      c_desc, c_modes_32.data(), CUTENSOR_OP_IDENTITY,
+      d_desc, c_modes_32.data(), CUTENSOR_OP_IDENTITY,
       d_desc, d_modes_32.data(),
       computeDesc
   ));
@@ -292,7 +302,6 @@ void tensor_product_bs_cuda_impl(
   // See https://docs.nvidia.com/cuda/cutensor/latest/api/cutensor.html#cutensorcontract 
   // for details on workspace allocation alignment requirements.
   auto workspace = cuda_async_alloc<char>(workspaceSizeEstimate, stream);
-  assert( uintptr_t(workspace.get()) % 256 != 0 );
 
   if (tapp_log_level>5) NVTX_MARK( "tapp_torch::cutensorBlockSparseContract" );
   HANDLE_ERROR(cutensorBlockSparseContract(handle, plan,

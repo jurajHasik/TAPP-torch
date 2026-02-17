@@ -285,7 +285,7 @@ def tensordot_bs(A: Tensor, B: Tensor,
     and analogous for B and D.
 
     modes_out (List[int], optional): Desired order of output modes. If None, the default order, corresponding
-        to modes_out=[0, 1, 2, ..., N-1] where N is the number of remaining modes after contraction, is used.
+        to modes_out=[0, 1, 2, ..., N-1] where N is the number of remaining modes after contraction, is used. 
 
     Returns:
     Tensor: The resulting tensor, a 1D array holding serialized blocks, after performing the tensordot operation.
@@ -313,7 +313,7 @@ def tensordot_bs(A: Tensor, B: Tensor,
     output_shape= d_offsets[-1] + torch.prod(torch.tensor(
         [d_sectionExtents_unflattened[i][extent] for i,extent in enumerate(d_blocks[-len(d_numSectionsPerMode):])] ))
     D = torch.empty(output_shape, dtype=A.dtype, device=A.device)
-    
+
     # Perform the tensor product with alpha=1 and beta=0
     tensor_product_bs(A, B, None, D, 
         modes_A, a_numSectionsPerMode, a_sectionExtents, 
@@ -347,6 +347,8 @@ def _(A, B, contracted_modes_A, contracted_modes_B,
 
     return D
 
+# TODO make use of element-wise op to avoid explicit conjugation in the backward.
+#      cuTensor 2.5.0 support only no-op 
 def _backward_tensordot_bs(ctx, grad_D):
     """
     A_a,in B_in,b = D_ab => 
@@ -397,7 +399,7 @@ def _backward_tensordot_bs(ctx, grad_D):
         for n,i in enumerate(oidx_fwd_a): modes_gA[i]= modes_gD[out_modes.index(n)]
         for n,i in enumerate(cidx_fwd_a): modes_gA[i]= modes_B[cidx_fwd_b[n]]
 
-        grad_A= torch.empty_like(A) if A is not None else torch.empty(shape_A, dtype=grad_D.dtype, device=grad_D.device)
+        grad_A= torch.zeros_like(A) if A is not None else torch.zeros(shape_A, dtype=grad_D.dtype, device=grad_D.device)
         tensor_product_bs(grad_D, B.conj(), None, grad_A, 
             modes_gD, *ctx.struct_D,
             modes_B, *ctx.struct_B,
@@ -420,7 +422,7 @@ def _backward_tensordot_bs(ctx, grad_D):
         for n,i in enumerate(oidx_fwd_b): modes_gB[i]= modes_gD[out_modes.index(ndim_D-len(oidx_fwd_b)+n)]
         for n,i in enumerate(cidx_fwd_b): modes_gB[i]= modes_A[cidx_fwd_a[n]]
 
-        grad_B= torch.empty_like(B) if B is not None else torch.empty(shape_B, dtype=grad_D.dtype, device=grad_D.device)
+        grad_B= torch.zeros_like(B) if B is not None else torch.zeros(shape_B, dtype=grad_D.dtype, device=grad_D.device)
         tensor_product_bs(A.conj(), grad_D, None, grad_B, 
             modes_A, *ctx.struct_A,
             modes_gD, *ctx.struct_D,

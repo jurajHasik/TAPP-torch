@@ -55,19 +55,30 @@ Requires Pytorch 2.10+
 
 ## Installation
 
-Get dependencies  `TAPP`, [`TBLIS`](https://github.com/MatthewsResearchGroup/tblis) as git submodules. These are cloned to `third-party/`.
+### TL;DR
+
+Get dependencies  `TAPP`, [`TBLIS`](https://github.com/MatthewsResearchGroup/tblis) as git submodules. These are cloned to `third-party/`. 
 
 ``` 
 git submodule update --init --recursive
 ```
 Get [`cuTensor`](https://developer.nvidia.com/cutensor), i.e. via `pip`, see [`cutensor-cu<XX>`](https://pypi.org/search/?q=cutensor).
+Then build TAPP and `tapp_torch` extension
 
-Next, build TAPP with (optionally) `TBLIS` and (optionally) `cuTensor`, here with CMake.
+```
+pip install --no-build-isolation -e .
+```
 
-NOTE: In case of builds within `conda`, you might need to specify i.e. `CC=cc CXX=g++` to get compilers recognized by CMake.
+### In depth
 
-NOTE: If no TBLIS_SOURCE_DIR is provided, TAPP's CMake checkouts TBLIS 
+**First**, `pip` automatically builds TAPP via CMake inside `third_party/tapp/build` with the process being controlled by the following environment variables
 
+* `TAPP_REFERENCE_BUILD_CUTENSOR_BINDINGS=ON` to build cuTensor bindings
+* `TAPP_REFERENCE_ENABLE_TBLIS=ON` to enable TBLIS for dense tensor contractions on `cpu`
+* `TAPP_REFERENCE_TBLIS_SOURCE_DIR=<path-to-tblis-source>` provide custom TBLIS source directory. Default set to `../../tblis`, which is to location of `tblis` submodule with respect to default build directory,
+* `TAPP_FORCE_BUILD=1` to rebuild TAPP i.e. clean default build dir and re-run CMake
+
+Alternatively, go to `third_party/tapp` and build TAPP directly
 
 ```bash
 mkdir third-party/tapp/build && cd third-party/tapp/build
@@ -76,15 +87,29 @@ cmake -DTAPP_REFERENCE_BUILD_CUTENSOR_BINDINGS=ON -DTAPP_REFERENCE_ENABLE_TBLIS=
 make -j <number-of-cores>
 ```
 
-Finally, build and install PyTorch extension (from the root of the repo)
+NOTE: *In case of builds within `conda`, you might need to specify i.e. `CC=cc CXX=g++` to get compilers recognized by CMake.*
 
-NOTE: If needed, adjust the path to TAPP build in `setup.py` accordingly. By default it is set to `third_party/tapp/build`.
+NOTE: *If no TBLIS_SOURCE_DIR is provided, TAPP's CMake checkouts TBLIS*
 
-NOTE: set USE_CUDA=0 to build cpu-only extension.
+**Second**, build and install `tapp_torch` PyTorch extension (from the root of the repo)
 
 ```
 pip install --no-build-isolation -e .
 ```
+
+the pre-built TAPP is detected and `pip` proceeds to directly build the extension (provided `TAPP_FORCE_BUILD` is not set).
+
+NOTE: *set `USE_CUDA=0` to build cpu-only extension.*
+
+### Troubleshooting
+
+Run verbose install 
+
+```
+pip install -v --no-build-isolation -e .
+```
+
+and look for `TAPP_torch` reporting on building TAPP in addition to other issues.
 
 ## Testing
 

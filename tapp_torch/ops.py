@@ -1,10 +1,11 @@
 from typing import List, Optional, Sequence, Tuple, Union
-import torch
+from math import prod
 import os
+import torch
 from torch import Tensor
 
 
-__all__ = ["tensor_product","tensordot","tensor_product_bs"]
+__all__ = ["tensor_product","tensordot","tensor_product_bs","tensordot_bs"]
 TAPP_LOG_LEVEL = int(os.environ.get('TAPP_LOG_LEVEL', '0'))
 
 def tensor_product(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor, 
@@ -245,6 +246,18 @@ def tensor_product_bs(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
         torch.cuda.nvtx.range_pop()
 
 
+def _tensordot_bs_output_size(d_numSectionsPerMode, d_sectionExtents, d_blocks, d_offsets)-> int:
+    """
+    Given tensordot_bs metadata for the output tensor D, compute the size of the output tensor.
+    """
+    d_sectionExtents_unflattened = []
+    idx = 0
+    for n in d_numSectionsPerMode:
+        d_sectionExtents_unflattened.append(list(d_sectionExtents[idx:idx+n]))
+        idx += n
+    return d_offsets[-1] + prod(
+        [d_sectionExtents_unflattened[i][extent] for i, extent in enumerate(d_blocks[-len(d_numSectionsPerMode):])])
+
 # NOTE signature for contracted_modes is not supported by torch custom_op 
 #
 # def tensordot_bs(A: Tensor, B: Tensor, 
@@ -304,14 +317,7 @@ def tensordot_bs(A: Tensor, B: Tensor,
         modes_D = [modes_D[i] for i in modes_out]
 
     # Create an output tensor with the computed shape
-    # Split d_sectionExtents into len(d_numSectionsPerMode) lists, with i-th list taking next d_numSectionsPerMode[i] elements
-    d_sectionExtents_unflattened = []
-    idx = 0
-    for n in d_numSectionsPerMode:
-        d_sectionExtents_unflattened.append(d_sectionExtents[idx:idx+n])
-        idx += n
-    output_shape= d_offsets[-1] + torch.prod(torch.tensor(
-        [d_sectionExtents_unflattened[i][extent] for i,extent in enumerate(d_blocks[-len(d_numSectionsPerMode):])] ))
+    output_shape= _tensordot_bs_output_size(d_numSectionsPerMode, d_sectionExtents, d_blocks, d_offsets)
     D = torch.empty(output_shape, dtype=A.dtype, device=A.device)
 
     # Perform the tensor product with alpha=1 and beta=0
@@ -335,25 +341,19 @@ def _(A, B, contracted_modes_A, contracted_modes_B,
         modes_out= None):
     
     # Create an output tensor with the computed shape
-    # Split d_sectionExtents into len(d_numSectionsPerMode) lists, with i-th list taking next d_numSectionsPerMode[i] elements
-    d_sectionExtents_unflattened = []
-    idx = 0
-    for n in d_numSectionsPerMode:
-        d_sectionExtents_unflattened.append(d_sectionExtents[idx:idx+n])
-        idx += n
-    output_shape= d_offsets[-1] + torch.prod(torch.tensor(
-        [d_sectionExtents_unflattened[i][extent] for i,extent in enumerate(d_blocks[-len(d_numSectionsPerMode):])] ))
+    output_shape= _tensordot_bs_output_size(d_numSectionsPerMode, d_sectionExtents, d_blocks, d_offsets)
     D = torch.empty(output_shape, dtype=A.dtype, device=A.device)
 
     return D
 
+
 # TODO make use of element-wise op to avoid explicit conjugation in the backward.
-#      cuTensor 2.5.0 support only no-op 
+#      cuTensor 2.5.0 support only no-op
 def _backward_tensordot_bs(ctx, grad_D):
     """
-    A_a,in B_in,b = D_ab => 
-        dA_a,in = dD_ab B_b,in 
-        dB_in,b = A_in,a dD_ab 
+    A_a,in B_in,b = D_ab =>
+        dA_a,in = dD_ab B_b,in
+        dB_in,b = A_in,a dD_ab
 
     dA, dB= dD . B^T, A^T . dD
     """
@@ -378,15 +378,15 @@ def _backward_tensordot_bs(ctx, grad_D):
     oidx_fwd_b= [i for i in range(ndim_B) if i not in cidx_fwd_b] # outgoing modes of B in forward
     idx_fwd_b= cidx_fwd_b + oidx_fwd_b                                  # permutation of B in forward
 
-    # forward(formally): 
+    # forward(formally):
     #   A_in->A_a,c and B_in->B_c,b => A_a,c B_c,b = D_ab => D_ab -> D_out
-    if ctx.needs_input_grad[0]: 
+    if ctx.needs_input_grad[0]:
         # dA_a,in = dD_ab B_b,in
         #
         cidx_bwd_b= oidx_fwd_b                                                       # contracted modes of B in backward
         cidx_bwd_d= [out_modes.index(ndim_D-len(oidx_fwd_b)+n) for n,_ in enumerate(oidx_fwd_b)] # contracted modes of D in backward
 
-        # grad_A shape is identical to shape of A 
+        # grad_A shape is identical to shape of A
         #   <=> to (outgoing indices of A <=> indices of grad_D without outgoing indices of B) & ingoing indices of B
         # TODO infer without relying on saved shapes
 
@@ -408,8 +408,8 @@ def _backward_tensordot_bs(ctx, grad_D):
             alpha=1., beta=0.)
 
     if ctx.needs_input_grad[1]:
-        # dB_in,b = A_in,a dD_ab 
-        # 
+        # dB_in,b = A_in,a dD_ab
+        #
         cidx_bwd_a= oidx_fwd_a                                      # contracted modes of A in backward
         cidx_bwd_d= [out_modes.index(n) for n,_ in enumerate(oidx_fwd_a)] # contracted modes of D in backward
 

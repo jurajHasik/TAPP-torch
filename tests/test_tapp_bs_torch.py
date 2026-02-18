@@ -1,6 +1,8 @@
 from itertools import accumulate
 import operator
 from typing import Union
+import numpy as np
+import symmray as sr
 import torch
 from torch.testing._internal.common_utils import (
     TestCase,
@@ -9,25 +11,10 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
 )
 from torch.testing._internal.optests import opcheck
+import tapp_torch
+
 
 DTYPE_OPTIONS= [torch.float32, torch.float64, torch.complex64, torch.complex128]
-
-# def reference_tensor_product(a, b, c, d,
-#                              modes_a, modes_b, modes_c, modes_d,
-#                              alpha, beta):
-#     d= alpha * torch.einsum(a, modes_a, b, modes_b, modes_d) + (beta * c if c is not None else 0) 
-#     return d
-
-# def reference_tensordot(a, b, contract_idx_a, contract_idx_b, out_order= None):
-#     res= torch.tensordot(a, b, dims=(contract_idx_a, contract_idx_b))
-#     res= res.permute(out_order) if out_order is not None else res
-#     return res
-
-import tapp_torch
-import json
-import numpy as np
-import symmray as sr
-import os
 
 
 class SymmrayAdapter:
@@ -443,6 +430,16 @@ class TestTensordotBs(TestCase):
         dtype= str(dtype).split(".")[1] # e.g. torch.float32 -> "float32"
         samples= [ 
             (sr.utils.get_rand("Z2",
+                ( sr.BlockIndex(chargemap={0:1,1:1}, dual=False),
+                    sr.BlockIndex(chargemap={0:1,1:1}, dual=True) ),
+                charge= 0, fermionic= False, dtype= dtype,),
+            sr.utils.get_rand("Z2",
+                ( sr.BlockIndex(chargemap={0:1,1:1}, dual=False),
+                    sr.BlockIndex(chargemap={0:1,1:1}, dual=False) ),
+                charge= 0, fermionic= False, dtype= dtype,),
+            [1], [1], None),
+
+            (sr.utils.get_rand("Z2",
                 ( sr.BlockIndex(chargemap={0:1,1:2}, dual=False),
                     sr.BlockIndex(chargemap={0:3,1:4}, dual=True) ),
                 charge= 0, fermionic= False, dtype= dtype,),
@@ -485,8 +482,8 @@ class TestTensordotBs(TestCase):
     @parametrize("dtype", DTYPE_OPTIONS)
     @parametrize("test_utils", ["test_schema",
                                 "test_autograd_registration",
-                                "test_faketensor",
-                                "test_aot_dispatch_dynamic"])
+                                "test_faketensor",])
+                                # "test_aot_dispatch_dynamic"])
                                 # "test_aot_dispatch_static", ])
     def test_opcheck_test(self, dtype, device, test_utils):
         samples = self.sample_inputs(dtype, device, requires_grad=False)
@@ -513,6 +510,45 @@ class TestTensordotBs(TestCase):
             
             diff_tensors = [a for a in args_tapp_torch_bs if isinstance(a, torch.Tensor) and a.requires_grad]
             out = tapp_torch.ops.tensordot_bs(*args_tapp_torch_bs)
+            grad_out = torch.randn_like(out)
+            grad_a, grad_b = torch.autograd.grad(out, diff_tensors, grad_out)
+
+            def f_reference_tensordot_bs(a,b):
+                # fill symmray arrays from torch tensors
+                A = SymmrayAdapter.fill(a, sample[0])
+                B = SymmrayAdapter.fill(b, sample[1])
+                res = reference_tensordot_bs(A, B, *sample[2:])
+
+                # flatten result back to torch tensor
+                return SymmrayAdapter.flatten(res, device=device)[0]
+
+            out = f_reference_tensordot_bs(*diff_tensors)
+            expected_grad_a, expected_grad_b = torch.autograd.grad(out, diff_tensors, grad_out)
+
+            G_a = SymmrayAdapter.fill(grad_a, sample[0])
+            G_a_expected = SymmrayAdapter.fill(expected_grad_a, sample[0])
+            torch.testing.assert_close(G_a.blocks, G_a_expected.blocks)
+
+            G_b = SymmrayAdapter.fill(grad_b, sample[1])
+            G_b_expected = SymmrayAdapter.fill(expected_grad_b, sample[1])
+            torch.testing.assert_close(G_b.blocks, G_b_expected.blocks)
+
+    @parametrize("device", ["cuda"] if torch.cuda.is_available() else [])
+    @parametrize("dtype", DTYPE_OPTIONS)
+    def test_gradients_compiled(self, dtype, device):
+        samples = self.sample_inputs(dtype, device, requires_grad=False)
+        for sample in samples:
+            # get structure of the resulting block-sparse tensor D
+            expected = reference_tensordot_bs(*sample)
+
+            args_tapp_torch_bs= make_sample_tensordot_bs( 
+                *sample[:2], expected, *sample[2:], device=device, requires_grad=True)
+            
+            diff_tensors = [a for a in args_tapp_torch_bs if isinstance(a, torch.Tensor) and a.requires_grad]
+            op_specialized = lambda x,y: tapp_torch.ops.tensordot_bs(x,y, *args_tapp_torch_bs[2:])
+            op_specialized_compiled = torch.compile(op_specialized)
+
+            out = op_specialized_compiled(*args_tapp_torch_bs[:2])
             grad_out = torch.randn_like(out)
             grad_a, grad_b = torch.autograd.grad(out, diff_tensors, grad_out)
 

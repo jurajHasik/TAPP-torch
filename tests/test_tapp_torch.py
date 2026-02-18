@@ -103,6 +103,7 @@ class TestTensordot(TestCase):
             [make_tensor(2,3,2), make_tensor(2,2,3), [1,2], [2,1], [1,0]],
             [make_tensor(2,3,4,5).conj(), make_tensor(2,3,5), [0,3], [0,2], [1,2,0]],
             [make_tensor(2,3,5).conj(), make_tensor(2,3,4,5).conj(), [2,0], [3,0], [2,1,0]],
+            [make_tensor(1,1,1,1,1,1), make_tensor(1,1,1,1,1,1), [1,5,2,3], [1,4,2,0]],
         ]
 
     @parametrize("device", ["cpu","cuda"] if torch.cuda.is_available() else ["cpu",])

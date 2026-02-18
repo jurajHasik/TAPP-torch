@@ -1,8 +1,10 @@
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/macros/Macros.h>
+#include <torch/headeronly/util/shim_utils.h>
 
 #include <cutensor.h>
 #include <cuda_runtime.h>
@@ -62,7 +64,8 @@ void tensor_product_impl_cuda(
   const std::optional<std::vector<int64_t>>& idx_C,
   const std::vector<int64_t>& idx_D,
   scalar_t alpha,
-  scalar_t beta) {
+  scalar_t beta,
+  cudaStream_t* stream_ptr = nullptr) {
 
   STD_TORCH_CHECK(A.scalar_type() == B.scalar_type() && A.scalar_type() == D.scalar_type(), 
   "All tensors must have the same dtype");
@@ -142,7 +145,12 @@ void tensor_product_impl_cuda(
   );
 
   TAPP_executor exec; // Declaration of executor
-  TAPP_create_executor(&exec); // Creation of executor
+  if (stream_ptr) {
+    // Wrap the provided CUDA stream in a TAPP executor
+    exec = (TAPP_executor)stream_ptr;
+  } else {
+    TAPP_create_executor(&exec); // Creation of executor
+  }
   // int exec_id = 1; // Choose executor
   // exec = (intptr_t)&exec_id; // Assign executor
 
@@ -203,6 +211,12 @@ void tensor_product_cuda(
   STD_TORCH_CHECK(alpha_t.dim() == 0 && beta_t.dim() == 0, "alpha/beta must be 0-dim tensors");
   STD_TORCH_CHECK(alpha_t.scalar_type() == beta_t.scalar_type(), "alpha/beta dtype must match");
 
+  // NOTE https://docs.pytorch.org/cppdocs/stable.html#getting-the-current-cuda-stream
+  void* stream_ptr = nullptr;
+  TORCH_ERROR_CODE_CHECK(
+    aoti_torch_get_current_cuda_stream(D.get_device_index(), &stream_ptr));
+  cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
+
   // currently not available ?
   // stable ABI does not support Scalar.
   //
@@ -222,25 +236,25 @@ void tensor_product_cuda(
       case torch::headeronly::ScalarType::Float: {
           auto alpha = *static_cast<const float*>(alpha_d.const_data_ptr());
           auto beta  = *static_cast<const float*>(beta_d.const_data_ptr());
-          tensor_product_impl_cuda<float>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          tensor_product_impl_cuda<float>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta, &stream);
           break;
       }
       case torch::headeronly::ScalarType::Double: {
           auto alpha = *static_cast<const double*>(alpha_d.const_data_ptr());
           auto beta  = *static_cast<const double*>(beta_d.const_data_ptr());
-          tensor_product_impl_cuda<double>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          tensor_product_impl_cuda<double>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta, &stream);
           break;
       }
       case torch::headeronly::ScalarType::ComplexFloat: {
           auto alpha = *static_cast<const std::complex<float>*>(alpha_d.const_data_ptr());
           auto beta  = *static_cast<const std::complex<float>*>(beta_d.const_data_ptr());
-          tensor_product_impl_cuda<std::complex<float>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          tensor_product_impl_cuda<std::complex<float>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta, &stream);
           break;
       }
       case torch::headeronly::ScalarType::ComplexDouble: {
           auto alpha = *static_cast<const std::complex<double>*>(alpha_d.const_data_ptr());
           auto beta  = *static_cast<const std::complex<double>*>(beta_d.const_data_ptr());
-          tensor_product_impl_cuda<std::complex<double>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta);
+          tensor_product_impl_cuda<std::complex<double>>(A, B, C, D, idx_A, idx_B, idx_C, idx_D, alpha, beta, &stream);
           break;
       }
       default:

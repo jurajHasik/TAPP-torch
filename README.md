@@ -153,7 +153,7 @@ See `benchmarks` folder.
 
 ### Requirements
 
-TAPP, TBLIS, cuTensor 2.5+, Pytorch 2.10+
+TAPP, Pytorch 2.10+, cuTensor 2.5+, (optional) TBLIS 
 
 
 ### References

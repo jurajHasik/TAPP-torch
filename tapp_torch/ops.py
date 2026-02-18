@@ -316,6 +316,8 @@ def tensordot_bs(A: Tensor, B: Tensor,
         assert len(modes_out)==len(modes_D), "modes_out must have the same length as the number of remaining modes"
         modes_D = [modes_D[i] for i in modes_out]
 
+    # TODO validation on metadata consistency (e.g. contracted modes must have same section extents, etc.)
+
     # Create an output tensor with the computed shape
     output_shape= _tensordot_bs_output_size(d_numSectionsPerMode, d_sectionExtents, d_blocks, d_offsets)
     D = torch.empty(output_shape, dtype=A.dtype, device=A.device)

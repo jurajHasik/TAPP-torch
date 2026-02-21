@@ -15,6 +15,7 @@ from torch.utils.cpp_extension import (
 )
 
 library_name = "tapp_torch"
+tapp_cutensor_lib_name = "tapp-cutensor"
 
 if torch.__version__ >= "2.6.0":
     py_limited_api = True
@@ -33,16 +34,20 @@ class CMakeBuildExt(BuildExtension):
 
     def initialize_options(self):
         super().initialize_options()
+        self.debug_mode = os.environ.get("DEBUG", "0").lower() in ["1", "on", "true"]
         self.tapp_force_build = os.environ.get("TAPP_FORCE_BUILD", "0").lower() in ["1", "on", "true"]
         self.tapp_cutensor_bindings = (torch.cuda.is_available() and CUDA_HOME is not None) \
-            or (os.environ.get("TAPP_REFERENCE_BUILD_CUTENSOR_BINDINGS", "0").lower() in ["1", "on", "true"])
-        self.tapp_tblis = os.environ.get("TAPP_REFERENCE_ENABLE_TBLIS", "0").lower() in ["1", "on", "true"]
+            or (os.environ.get("TAPP_CUTENSOR_BINDINGS", "0").lower() in ["1", "on", "true"])
+        self.tapp_tblis = os.environ.get("TAPP_REFERENCE_USE_TBLIS", "0").lower() in ["1", "on", "true"]
         self.tapp_tblis_source_dir = os.environ.get("TAPP_REFERENCE_TBLIS_SOURCE_DIR", "../../tblis") # default submodule location
 
     def finalize_options(self):
         super().finalize_options()
         # Under pip install, no command line options are passed. Values from initialize_options are used
         # Command line options (if any) override environment variables
+        if (isinstance(self.debug_mode, int) and self.debug_mode in [1,]) or \
+            (isinstance(self.debug_mode, str) and self.debug_mode.lower() in ["1", "on", "true"]):
+            self.debug_mode = True
         if (isinstance(self.tapp_force_build, int) and self.tapp_force_build in [1,]) \
             or (isinstance(self.tapp_force_build, str) and self.tapp_force_build.lower() in ["1", "on", "true"]):
             self.tapp_force_build = True
@@ -62,7 +67,7 @@ class CMakeBuildExt(BuildExtension):
         # Default paths for tapp build dir
         tapp_src = os.path.abspath(os.path.join(os.path.dirname(__file__), "third_party", "tapp"))
         tapp_build = os.path.join(tapp_src, "build")
-        tapp_lib_cutensor = os.path.join(tapp_build, "cutensor_bindings", "libcutensor_bindings.so")
+        tapp_lib_cutensor = os.path.join(tapp_build, "cutensor_bindings", f"{tapp_cutensor_lib_name}.so")
         tapp_lib_default = os.path.join(tapp_build, "libtapp-reference.so")
 
         # get environment variable to decide which tapp lib to link against
@@ -86,8 +91,9 @@ class CMakeBuildExt(BuildExtension):
             # Configure
             subprocess.check_call([
                 "cmake",
-                f"-DTAPP_REFERENCE_BUILD_CUTENSOR_BINDINGS={build_cutensor_bindings}",
-                f"-DTAPP_REFERENCE_ENABLE_TBLIS={use_tblis}",
+                "-DCMAKE_BUILD_TYPE="+("Debug" if self.debug_mode else "Release"),
+                f"-DTAPP_CUTENSOR={build_cutensor_bindings}",
+                f"-DTAPP_REFERENCE_USE_TBLIS={use_tblis}",
                 f"-DTAPP_REFERENCE_TBLIS_SOURCE_DIR={tapp_tblis_source_dir}",
                 ".."
             ], cwd=tapp_build)
@@ -188,7 +194,7 @@ def get_extensions():
                     extra_link_args=extra_link_args+[
                         f"-L{tapp_cutensor_lib_dir}",
                         f"-Wl,-rpath,{tapp_cutensor_lib_dir}",
-                        "-lcutensor_bindings",
+                        f"-l{tapp_cutensor_lib_name}",
                     ],
                     py_limited_api=py_limited_api,
                 )

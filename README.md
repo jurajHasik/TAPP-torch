@@ -84,8 +84,8 @@ pip install --no-build-isolation -e .
 
 **First**, `pip` automatically builds TAPP via CMake inside `third_party/tapp/build` with the process being controlled by the following environment variables
 
-* `TAPP_REFERENCE_BUILD_CUTENSOR_BINDINGS=ON` to build cuTensor bindings
-* `TAPP_REFERENCE_ENABLE_TBLIS=ON` to enable TBLIS for dense tensor contractions on `cpu`
+* `TAPP_CUTENSOR_BINDINGS=ON` to build cuTensor bindings
+* `TAPP_REFERENCE_USE_TBLIS=ON` to enable TBLIS for dense tensor contractions on `cpu`
 * `TAPP_REFERENCE_TBLIS_SOURCE_DIR=<path-to-tblis-source>` provide custom TBLIS source directory. Default set to `../../tblis`, which is to location of `tblis` submodule with respect to default build directory,
 * `TAPP_FORCE_BUILD=1` to rebuild TAPP i.e. clean default build dir and re-run CMake
 
@@ -93,7 +93,7 @@ Alternatively, go to `third_party/tapp` and build TAPP directly
 
 ```bash
 mkdir third-party/tapp/build && cd third-party/tapp/build
-cmake -DTAPP_REFERENCE_BUILD_CUTENSOR_BINDINGS=ON -DTAPP_REFERENCE_ENABLE_TBLIS=ON \
+cmake -DTAPP_CUTENSOR_BINDINGS=ON -DTAPP_REFERENCE_USE_TBLIS=ON \
     -DTAPP_REFERENCE_TBLIS_SOURCE_DIR=../../tblis ..
 make -j <number-of-cores>
 ```

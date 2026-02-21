@@ -3,7 +3,7 @@ requires = [
   "setuptools",
   "hatchling",
   "hatch-vcs",
-  "torch>=2.10",
+  "torch>2.9",
   # cutensor must be pre-installed
 ]
 build-backend = "setuptools.build_meta"
@@ -15,7 +15,7 @@ requires-python = ">=3.10"
 description = "TAPP extension for PyTorch using Stable ABI"
 readme = "README.md"
 dependencies = [
-  "torch>=2.10",
+  "torch>2.9",
   "numpy",
 ]
 

@@ -93,9 +93,9 @@ Alternatively, go to `third_party/tapp` and build TAPP directly
 
 ```bash
 mkdir third-party/tapp/build && cd third-party/tapp/build
-cmake -DTAPP_CUTENSOR_BINDINGS=ON -DTAPP_REFERENCE_USE_TBLIS=ON \
+cmake -DCMAKE_BUILD_TYPE=Release -DTAPP_CUTENSOR_BINDINGS=ON -DTAPP_REFERENCE_USE_TBLIS=ON \
     -DTAPP_REFERENCE_TBLIS_SOURCE_DIR=../../tblis ..
-make -j <number-of-cores>
+cmake -j <number-of-cores>
 ```
 
 NOTE: *In case of builds within `conda`, you might need to specify i.e. `CC=cc CXX=g++` to get compilers recognized by CMake.*

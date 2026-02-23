@@ -23,7 +23,29 @@ if torch.__version__ >= "2.6.0":
 else:
     py_limited_api = False
 
+def locate_cutensor():
+    cutensor_root = os.environ.get("CUTENSOR_ROOT")
+    include_dir, lib_dir = None, None
+    if cutensor_root:
+        include_dir = os.path.join(cutensor_root, "include")
+        lib_dir = os.path.join(cutensor_root, "lib")
+        if os.path.exists(include_dir) and os.path.exists(lib_dir):
+            return include_dir, lib_dir
+        else:
+            print(f"locate_cutensor Warning: CUTENSOR_ROOT is set to {cutensor_root} but include or lib directories not found.")
 
+    # Fallback to CUDA default locations
+    cuda_home = os.environ.get("CUDA_HOME")
+    if not cuda_home:
+        print(f"locate_cutensor Warning: CUDA_HOME is not set, attempting with default CUDA path.")
+        cuda_home= os.path.join("/"+"usr","local","cuda")
+    include_dir = os.path.join(cuda_home, "include")
+    lib_dir = os.path.join(cuda_home, "lib64")
+    if os.path.exists(include_dir) and os.path.exists(lib_dir):
+        return include_dir, lib_dir
+    
+    return None, None
+    
 class CMakeBuildExt(BuildExtension):
     # See https://github.com/pypa/setuptools/blob/main/docs/deprecated/distutils/apiref.rst
     user_options = BuildExtension.user_options + [
@@ -185,17 +207,23 @@ def get_extensions():
 
     # CUDA extension — links against libcutensor_binds only (NOT libtapp-reference)
     if use_cuda:
+        cutensor_include_dir, cutensor_lib_dir= locate_cutensor()
         if cuda_sources:
             ext_modules.append(
                 CUDAExtension(
                     f"{library_name}._C_cuda",
                     cuda_sources,
-                    include_dirs=[tapp_include_dir, tapp_cutensor_include_dir],
+                    include_dirs=[tapp_include_dir, 
+                                  tapp_cutensor_include_dir,
+                                  cutensor_include_dir],
                     extra_compile_args=extra_compile_args,
                     extra_link_args=extra_link_args+[
                         f"-L{tapp_cutensor_lib_dir}",
                         f"-Wl,-rpath,{tapp_cutensor_lib_dir}",
                         f"-l{tapp_cutensor_lib_name}",
+                        f"-L{cutensor_lib_dir}",
+                        f"-Wl,-rpath,{cutensor_lib_dir}",
+                        f"-lcutensor",
                     ],
                     py_limited_api=py_limited_api,
                 )

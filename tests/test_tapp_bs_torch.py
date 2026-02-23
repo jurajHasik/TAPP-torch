@@ -482,9 +482,9 @@ class TestTensordotBs(TestCase):
     @parametrize("dtype", DTYPE_OPTIONS)
     @parametrize("test_utils", ["test_schema",
                                 "test_autograd_registration",
-                                "test_faketensor",])
-                                # "test_aot_dispatch_dynamic"])
-                                # "test_aot_dispatch_static", ])
+                                "test_faketensor",
+                                "test_aot_dispatch_static",
+                                "test_aot_dispatch_dynamic"])
     def test_opcheck_test(self, dtype, device, test_utils):
         samples = self.sample_inputs(dtype, device, requires_grad=False)
         op = getattr(torch.ops, "tapp_torch").tensordot_bs.default

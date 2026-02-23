@@ -213,7 +213,7 @@ void tensor_product_bs_cuda_impl(
 ) {
   const char* env = std::getenv("TAPP_LOG_LEVEL");
   int tapp_log_level = (env) ? std::atoi(env) : 0;
-       
+
   cutensorHandle_t handle;
   HANDLE_ERROR(cutensorCreate(&handle));
 

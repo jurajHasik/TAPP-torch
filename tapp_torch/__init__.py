@@ -3,5 +3,5 @@ from . import _C, ops
 
 try:
     from . import _C_cuda
-except ImportError:
+except ImportError as e:
     pass

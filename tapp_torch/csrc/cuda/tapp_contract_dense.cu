@@ -90,10 +90,10 @@ void tensor_product_impl_cuda(
     STD_TORCH_CHECK(static_cast<int64_t>(idx_C->size()) == C.dim(), 
             "Index vector length must match tensor C dimensions");
   }
-  
+
   TAPP_handle handle;
   TAPP_create_handle(&handle);
-
+  
   // Get TAPP datatype
   TAPP_datatype dtype = get_tapp_dtype(D);
 
@@ -178,7 +178,11 @@ void tensor_product_impl_cuda(
     TAPP_destroy_tensor_info(info_B);
     TAPP_destroy_tensor_info(info_C);
     TAPP_destroy_tensor_info(info_D);
-    TAPP_destroy_executor(exec);
+    if (stream_ptr) {
+      // Stream was provided by caller, do not destroy
+    } else {
+      TAPP_destroy_executor(exec);
+    }
     TAPP_destroy_handle(handle);
     
     STD_TORCH_CHECK(false, "TAPP contraction failed: ", msg_buff.data());
@@ -190,7 +194,11 @@ void tensor_product_impl_cuda(
   TAPP_destroy_tensor_info(info_B);
   TAPP_destroy_tensor_info(info_C);
   TAPP_destroy_tensor_info(info_D);
-  TAPP_destroy_executor(exec);
+  if (stream_ptr) {
+    // Stream was provided by caller, do not destroy
+  } else {
+    TAPP_destroy_executor(exec);
+  }
   TAPP_destroy_handle(handle);
 }
 

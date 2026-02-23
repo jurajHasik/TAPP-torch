@@ -15,6 +15,7 @@ from torch.utils.cpp_extension import (
 )
 
 library_name = "tapp_torch"
+tapp_reference_lib_name = "tapp-reference"
 tapp_cutensor_lib_name = "tapp-cutensor"
 
 if torch.__version__ >= "2.6.0":
@@ -67,8 +68,8 @@ class CMakeBuildExt(BuildExtension):
         # Default paths for tapp build dir
         tapp_src = os.path.abspath(os.path.join(os.path.dirname(__file__), "third_party", "tapp"))
         tapp_build = os.path.join(tapp_src, "build")
-        tapp_lib_cutensor = os.path.join(tapp_build, "cutensor_bindings", f"{tapp_cutensor_lib_name}.so")
-        tapp_lib_default = os.path.join(tapp_build, "libtapp-reference.so")
+        tapp_lib_cutensor = os.path.join(tapp_build, "cutensor_bindings", f"lib{tapp_cutensor_lib_name}.so")
+        tapp_lib_default = os.path.join(tapp_build,  "reference_implementation", f"lib{tapp_reference_lib_name}.so")
 
         # get environment variable to decide which tapp lib to link against
         build_cutensor_bindings = "ON" if self.tapp_cutensor_bindings else "OFF"
@@ -116,7 +117,7 @@ def get_extensions():
     use_cuda = use_cuda and torch.cuda.is_available() and CUDA_HOME is not None
 
     tapp_lib_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "third_party", "tapp", "build",
+        os.path.dirname(os.path.abspath(__file__)), "third_party", "tapp", "build", "reference_implementation",
     )
     tapp_include_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "third_party", "tapp", "api", "include",
@@ -176,7 +177,7 @@ def get_extensions():
             extra_link_args=extra_link_args+[
                 f"-L{tapp_lib_dir}",
                 f"-Wl,-rpath,{tapp_lib_dir}",
-                "-ltapp-reference",
+                f"-l{tapp_reference_lib_name}",
             ],
             py_limited_api=py_limited_api,
         )
@@ -206,6 +207,7 @@ def get_extensions():
 setup(
     packages=find_packages(),
     ext_modules=get_extensions(),
-    cmdclass={"build_ext": CMakeBuildExt}, #BuildExtension},
+    cmdclass={"build_ext": CMakeBuildExt},
+    # cmdclass={"build_ext": BuildExtension},
     options={"bdist_wheel": {"py_limited_api": "cp39"}} if py_limited_api else {},
 )

@@ -29,10 +29,12 @@ def locate_cutensor():
     if cutensor_root:
         include_dir = os.path.join(cutensor_root, "include")
         lib_dir = os.path.join(cutensor_root, "lib")
+        if not os.path.exists(lib_dir):
+            lib_dir = os.path.join(cutensor_root, "lib64")
         if os.path.exists(include_dir) and os.path.exists(lib_dir):
             return include_dir, lib_dir
         else:
-            print(f"locate_cutensor Warning: CUTENSOR_ROOT is set to {cutensor_root} but include or lib directories not found.")
+            print(f"locate_cutensor Warning: CUTENSOR_ROOT is set to {cutensor_root} but include or lib and lib64 directories not found.")
 
     # Fallback to CUDA default locations
     cuda_home = os.environ.get("CUDA_HOME")

@@ -136,9 +136,10 @@ def get_extensions():
     debug_mode = os.getenv("DEBUG", "0") == "1"
     use_cuda = os.getenv("USE_CUDA", "1") == "1"
     if debug_mode:
-        print("Compiling in debug mode")
+        print(f"{library_name}: Compiling in debug mode")
 
-    use_cuda = use_cuda and torch.cuda.is_available() and CUDA_HOME is not None
+    # When building containers, CUDA runtime is not available - rely on CUDA_HOME only
+    use_cuda = use_cuda and (torch.cuda.is_available() or CUDA_HOME is not None)
 
     tapp_lib_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "third_party", "tapp", "build", "reference_implementation",

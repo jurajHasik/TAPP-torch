@@ -306,6 +306,7 @@ def tensordot_bs(A: Tensor, B: Tensor,
             The order of the remaining modes is preserved from A followed by B, unless modes_out is specified.
     """
     # Determine the output shape and reindex modes to match the tensor_product api
+    if TAPP_LOG_LEVEL > 5: torch.cuda.nvtx.mark(f"TAPP_tensordot_bs_mode_reindex_start")
     modes_A= list(range(len(a_numSectionsPerMode)))
     modes_B= [modes_A[contracted_modes_A[contracted_modes_B.index(n)]] if n in contracted_modes_B else j 
               for n,j in enumerate(range(len(a_numSectionsPerMode), len(a_numSectionsPerMode)+len(b_numSectionsPerMode)))]

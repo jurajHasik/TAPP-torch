@@ -233,7 +233,8 @@ def tensor_product_bs(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
         beta_t= torch.tensor(beta, dtype= torch.float64, device='cpu')
     elif (isinstance(beta, float) and D.is_complex()) or isinstance(beta, complex):
         beta_t= torch.tensor(beta, dtype= torch.complex128, device='cpu')
-    
+    if TAPP_LOG_LEVEL > 5: torch.cuda.nvtx.mark(f"TAPP_tensor_product_bs_scalars_done")
+
     if TAPP_LOG_LEVEL > 5:
         torch.cuda.nvtx.range_push(f"TAPP_tensor_product_bs")
     torch.ops.tapp_torch.tensor_product_bs.default(A,B,C,D,
@@ -315,14 +316,16 @@ def tensordot_bs(A: Tensor, B: Tensor,
     if modes_out is not None:
         assert len(modes_out)==len(modes_D), "modes_out must have the same length as the number of remaining modes"
         modes_D = [modes_D[i] for i in modes_out]
-
+    if TAPP_LOG_LEVEL > 5: torch.cuda.nvtx.mark(f"TAPP_tensordot_bs_mode_reindex_done")
     # TODO validation on metadata consistency (e.g. contracted modes must have same section extents, etc.)
 
     # Create an output tensor with the computed shape
     output_shape= _tensordot_bs_output_size(d_numSectionsPerMode, d_sectionExtents, d_blocks, d_offsets)
+    if TAPP_LOG_LEVEL > 5: torch.cuda.nvtx.mark(f"TAPP_tensordot_bs_output_shape_done")
     D = torch.empty(output_shape, dtype=A.dtype, device=A.device)
 
     # Perform the tensor product with alpha=1 and beta=0
+    if TAPP_LOG_LEVEL > 5: torch.cuda.nvtx.mark(f"TAPP_tensordot_bs_call_tensor_product_bs_alpha1_beta0")
     tensor_product_bs(A, B, None, D, 
         modes_A, a_numSectionsPerMode, a_sectionExtents, 
         a_blocks, a_strides , a_offsets,

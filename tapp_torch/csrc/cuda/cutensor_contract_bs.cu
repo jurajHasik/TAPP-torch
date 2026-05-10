@@ -493,9 +493,65 @@ switch (D.scalar_type()) {
 }
 }
 
+// v2: blocks/strides/offsets arrive as CPU int64 Tensors; unpack via bulk memcpy then delegate.
+// This avoids the per-element Python→C++ IValue boxing that occurs when passing Sequence[int]
+// through the PyTorch custom-op dispatcher for large block arrays.
+void tensor_product_bs_v2_cuda(
+    const torch::stable::Tensor& A,
+    const torch::stable::Tensor& B,
+    const torch::stable::Tensor& C,
+    torch::stable::Tensor& D,
+    const std::vector<int64_t>& a_modes,
+    const std::vector<int64_t>& a_numSectionsPerMode,
+    const std::vector<int64_t>& a_sectionExtents,
+    const torch::stable::Tensor& a_blocks_t,
+    const torch::stable::Tensor& a_strides_t,
+    const torch::stable::Tensor& a_offsets_t,
+    const std::vector<int64_t>& b_modes,
+    const std::vector<int64_t>& b_numSectionsPerMode,
+    const std::vector<int64_t>& b_sectionExtents,
+    const torch::stable::Tensor& b_blocks_t,
+    const torch::stable::Tensor& b_strides_t,
+    const torch::stable::Tensor& b_offsets_t,
+    const std::optional<std::vector<int64_t>>& c_modes,
+    const std::optional<std::vector<int64_t>>& c_numSectionsPerMode,
+    const std::optional<std::vector<int64_t>>& c_sectionExtents,
+    const torch::stable::Tensor& c_blocks_t,
+    const torch::stable::Tensor& c_strides_t,
+    const torch::stable::Tensor& c_offsets_t,
+    const std::vector<int64_t>& d_modes,
+    const std::vector<int64_t>& d_numSectionsPerMode,
+    const std::vector<int64_t>& d_sectionExtents,
+    const torch::stable::Tensor& d_blocks_t,
+    const torch::stable::Tensor& d_strides_t,
+    const torch::stable::Tensor& d_offsets_t,
+    const torch::stable::Tensor& alpha_t,
+    const torch::stable::Tensor& beta_t
+) {
+  auto t2v = [](const torch::stable::Tensor& t) -> std::vector<int64_t> {
+    const auto* p = static_cast<const int64_t*>(t.const_data_ptr());
+    return std::vector<int64_t>(p, p + t.numel());
+  };
+
+  std::optional<std::vector<int64_t>> c_blocks, c_strides, c_offsets;
+  if (c_blocks_t.defined()) {
+    c_blocks  = t2v(c_blocks_t);
+    c_strides = t2v(c_strides_t);
+    c_offsets = t2v(c_offsets_t);
+  }
+
+  tensor_product_bs_cuda(A, B, C, D,
+    a_modes, a_numSectionsPerMode, a_sectionExtents, t2v(a_blocks_t), t2v(a_strides_t), t2v(a_offsets_t),
+    b_modes, b_numSectionsPerMode, b_sectionExtents, t2v(b_blocks_t), t2v(b_strides_t), t2v(b_offsets_t),
+    c_modes, c_numSectionsPerMode, c_sectionExtents, c_blocks, c_strides, c_offsets,
+    d_modes, d_numSectionsPerMode, d_sectionExtents, t2v(d_blocks_t), t2v(d_strides_t), t2v(d_offsets_t),
+    alpha_t, beta_t);
+}
+
 // Registers CUDA implementation
 STABLE_TORCH_LIBRARY_IMPL(tapp_torch, CUDA, m) {
-  m.impl("tensor_product_bs", TORCH_BOX(&tensor_product_bs_cuda));
+  m.impl("tensor_product_bs",    TORCH_BOX(&tensor_product_bs_cuda));
+  m.impl("tensor_product_bs_v2", TORCH_BOX(&tensor_product_bs_v2_cuda));
 }
 
 } // namespace tapp_torch

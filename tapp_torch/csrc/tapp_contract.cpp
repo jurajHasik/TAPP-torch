@@ -272,6 +272,13 @@ STABLE_TORCH_LIBRARY(tapp_torch, m) {
     "int[]? c_modes, int[]? c_numSectionsPerMode, int[]? c_sectionExtents, int[]? c_blocks, int[]? c_strides, int[]? c_offsets, "
     "int[] d_modes, int[] d_numSectionsPerMode, int[] d_sectionExtents, int[] d_blocks, int[] d_strides, int[] d_offsets, "
     "Tensor alpha, Tensor beta) -> ()");
+  // v2: blocks/strides/offsets passed as Tensor (int64) to avoid per-element IValue boxing overhead
+  m.def("tensor_product_bs_v2(Tensor a, Tensor b, Tensor c, Tensor(t!) out, "
+    "int[] a_modes, int[] a_numSectionsPerMode, int[] a_sectionExtents, Tensor a_blocks, Tensor a_strides, Tensor a_offsets, "
+    "int[] b_modes, int[] b_numSectionsPerMode, int[] b_sectionExtents, Tensor b_blocks, Tensor b_strides, Tensor b_offsets, "
+    "int[]? c_modes, int[]? c_numSectionsPerMode, int[]? c_sectionExtents, Tensor c_blocks, Tensor c_strides, Tensor c_offsets, "
+    "int[] d_modes, int[] d_numSectionsPerMode, int[] d_sectionExtents, Tensor d_blocks, Tensor d_strides, Tensor d_offsets, "
+    "Tensor alpha, Tensor beta) -> ()");
 }
 
 // Registers CPU implementations

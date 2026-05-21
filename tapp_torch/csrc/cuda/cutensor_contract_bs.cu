@@ -13,16 +13,21 @@
 #include <cuda_runtime.h>
 #include <cutensor.h>
 
-// Optional NVTX3 support
+// Optional NVTX support — prefer C++ API, fall back to legacy C API
 #if __has_include(<nvtx3/nvtx3.hpp>)
     #include <nvtx3/nvtx3.hpp>
+    #define CUBLOCKSPARSE_HAS_NVTX 2
+#elif __has_include(<nvtx3/nvToolsExt.h>)
+    #include <nvtx3/nvToolsExt.h>
     #define CUBLOCKSPARSE_HAS_NVTX 1
 #else
     #define CUBLOCKSPARSE_HAS_NVTX 0
 #endif
 // NVTX helper macro - no-op when NVTX is not available
-#if CUBLOCKSPARSE_HAS_NVTX
+#if CUBLOCKSPARSE_HAS_NVTX == 2
     #define NVTX_MARK(msg) nvtx3::mark(msg)
+#elif CUBLOCKSPARSE_HAS_NVTX == 1
+    #define NVTX_MARK(msg) nvtxMarkA(msg)
 #else
     #define NVTX_MARK(msg) ((void)0)
 #endif
@@ -278,6 +283,7 @@ void tensor_product_bs_cuda_impl(
       d_desc, d_modes_32.data(),
       computeDesc
   ));
+  if (tapp_log_level>5) NVTX_MARK("tapp_torch::tensor_product_bs_cuda_impl cutensorCreateBlockSparseContraction");
     
   // Create plan preference (using default settings here)
   cutensorPlanPreference_t planPref = nullptr;
@@ -292,18 +298,20 @@ void tensor_product_bs_cuda_impl(
   HANDLE_ERROR(cutensorEstimateWorkspaceSize(
       handle, contractionDesc, planPref, workspacePref, &workspaceSizeEstimate
   ));
+  if (tapp_log_level>5) NVTX_MARK("tapp_torch::tensor_product_bs_cuda_impl cutensorEstimateWorkspaceSize");
 
   // Create plan
   cutensorPlan_t plan;
   HANDLE_ERROR(cutensorCreatePlan(
       handle, &plan, contractionDesc, planPref, workspaceSizeEstimate
   ));
+  if (tapp_log_level>5) NVTX_MARK("tapp_torch::tensor_product_bs_cuda_impl cutensorCreatePlan");
 
   // See https://docs.nvidia.com/cuda/cutensor/latest/api/cutensor.html#cutensorcontract 
   // for details on workspace allocation alignment requirements.
   auto workspace = cuda_async_alloc<char>(workspaceSizeEstimate, stream);
 
-  if (tapp_log_level>5) NVTX_MARK( "tapp_torch::cutensorBlockSparseContract" );
+  if (tapp_log_level>5) NVTX_MARK( "tapp_torch::cutensorBlockSparseContract start" );
   HANDLE_ERROR(cutensorBlockSparseContract(handle, plan,
               (const void*) &alpha, (const void *const *) A.data(), (const void *const *) B.data(),
               (const void*) &beta,  (const void *const *) (C.has_value() ? C.value().data() : D.data()), 
@@ -403,12 +411,14 @@ void tensor_product_bs_cuda(
     // Check if beta is 0
     // Accept both scalar and rank-1 tensor with a single element
   }
+  if (tapp_log_level>5) NVTX_MARK( "tapp_torch::tensor_product_bs_cuda validation" );
 
   // NOTE https://docs.pytorch.org/cppdocs/stable.html#getting-the-current-cuda-stream
   void* stream_ptr = nullptr;
   TORCH_ERROR_CODE_CHECK(
     aoti_torch_get_current_cuda_stream(D.get_device_index(), &stream_ptr));
   cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
+  if (tapp_log_level>5) NVTX_MARK( "tapp_torch::tensor_product_bs_cuda stream" );
 
   STD_TORCH_CHECK(!C.defined() || (c_modes.has_value() && c_blocks.has_value() && c_offsets.has_value()),
       "If C is defined, all of c_modes, c_blocks, and c_offsets must be provided");
@@ -427,6 +437,7 @@ void tensor_product_bs_cuda(
     torch::stable::Device(torch::headeronly::DeviceType::CPU));
   auto beta_d  = torch::stable::to(beta_t, D.scalar_type(), std::nullopt, 
     torch::stable::Device(torch::headeronly::DeviceType::CPU));
+  if (tapp_log_level>5) NVTX_MARK( "tapp_torch::tensor_product_bs_cuda scalar factors" );
 
   auto l_tensor_product_bs_cuda_impl = [&](auto alpha, auto beta) {
     using scalar_t = typename std::remove_cv<decltype(alpha)>::type; // base type
@@ -451,6 +462,7 @@ void tensor_product_bs_cuda(
     } else {
       c = std::nullopt;
     }
+    if (tapp_log_level>5) NVTX_MARK( "tapp_torch::tensor_product_bs_cuda device pointers" );
 
     tensor_product_bs_cuda_impl<scalar_t>(
         a, b, c, d,
@@ -528,6 +540,9 @@ void tensor_product_bs_v2_cuda(
     const torch::stable::Tensor& alpha_t,
     const torch::stable::Tensor& beta_t
 ) {
+  const char* env = std::getenv("TAPP_LOG_LEVEL");
+  int tapp_log_level = (env) ? std::atoi(env) : 0;
+
   auto t2v = [](const torch::stable::Tensor& t) -> std::vector<int64_t> {
     const auto* p = static_cast<const int64_t*>(t.const_data_ptr());
     return std::vector<int64_t>(p, p + t.numel());
@@ -539,6 +554,7 @@ void tensor_product_bs_v2_cuda(
     c_strides = t2v(c_strides_t);
     c_offsets = t2v(c_offsets_t);
   }
+  if (tapp_log_level>5) NVTX_MARK( "tapp_torch::tensor_product_bs_cuda_v2 t2v" );
 
   tensor_product_bs_cuda(A, B, C, D,
     a_modes, a_numSectionsPerMode, a_sectionExtents, t2v(a_blocks_t), t2v(a_strides_t), t2v(a_offsets_t),

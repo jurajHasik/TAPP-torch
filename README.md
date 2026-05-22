@@ -64,6 +64,11 @@ Light-weight interface for block-sparse tensors is provided by [symmray](https:/
 
 See `benchmarks` folder.
 
+## Caching
+
+Control caching of cuTensor descriptors. Cache size can be set via ``TAPP_DESCRIPTOR_CACHE_SIZE`` environment variable.
+Set to 0 for unlimited cache or to 4 or higher. Default is 1024.
+
 ## Installation
 
 ### TL;DR

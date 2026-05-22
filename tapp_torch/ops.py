@@ -5,6 +5,7 @@ import torch
 from torch import Tensor
 
 
+
 __all__ = ["tensor_product","tensordot","tensor_product_bs","tensordot_bs",
            "tensor_product_bs_v2","tensordot_bs_v2"]
 TAPP_LOG_LEVEL = int(os.environ.get('TAPP_LOG_LEVEL', '0'))
@@ -660,3 +661,40 @@ def _setup_context_tensordot_bs_v2(ctx, inputs, output):
 torch.library.register_autograd(
     "tapp_torch::tensordot_bs_v2", _backward_tensordot_bs_v2,
     setup_context=_setup_context_tensordot_bs_v2)
+
+
+# ── Block-sparse descriptor cache management (CUDA only) ─────────────────────
+try:
+    from . import _C_cuda
+
+    __all__ += ["descriptor_cache_clear", "descriptor_cache_set_max_size",
+                "descriptor_cache_stats", "descriptor_cache_size"]
+
+    def descriptor_cache_clear() -> None:
+        """Clear all entries from the block-sparse descriptor cache and reset hit/miss counters."""
+        _C_cuda.descriptor_cache_clear()
+
+    def descriptor_cache_set_max_size(n: int) -> None:
+        """Set the maximum number of entries in the descriptor cache.
+
+        If the current size exceeds *n*, the least-recently-used entries are evicted
+        immediately.  Pass 0 for unlimited capacity.
+        Defaults to 1024 or the value of the ``TAPP_DESCRIPTOR_CACHE_SIZE`` env var.
+        """
+        _C_cuda.descriptor_cache_set_max_size(n)
+
+    def descriptor_cache_stats() -> Tuple[int, int]:
+        """Return ``(hits, misses)`` counters for the block-sparse descriptor cache."""
+        return _C_cuda.descriptor_cache_stats()
+
+    def descriptor_cache_size() -> Tuple[int, int]:
+        """Return ``(count, host_bytes)`` for the descriptor cache.
+
+        *count* is the number of cached descriptors.
+        *host_bytes* is the estimated host-side memory used by the cache keys
+        (GPU-internal descriptor memory is not included).
+        """
+        return _C_cuda.descriptor_cache_size()
+
+except ImportError:
+    pass

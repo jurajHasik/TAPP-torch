@@ -66,8 +66,13 @@ See `benchmarks` folder.
 
 ## Caching
 
-Control caching of cuTensor descriptors. Cache size can be set via ``TAPP_DESCRIPTOR_CACHE_SIZE`` environment variable.
+Control caching of cuTensor block-sparse descriptors and plans. 
+
+* Block-sparse tensor descriptor cache: Size can be set via ``TAPP_DESCRIPTOR_CACHE_SIZE`` environment variable.
 Set to 0 for unlimited cache or to 4 or higher. Default is 1024.
+
+* Block-sparse contraction descriptor and plan cache: Size can be set via ``TAPP_PLAN_CACHE_SIZE`` environment variable.
+Set to 0 for unlimited cache or to 1 or higher. Default is 256.
 
 ## Installation
 
@@ -154,13 +159,13 @@ pytest tests/test_tapp_torch.py::TestTensordot -s
 ### Block-sparse tensors
 
 ```bash
-pytest tests/test_tapp_torch.py::TestTensorProductBs -s
+pytest tests/test_tapp_bs_torch.py::TestTensorProductBs -s
 ```
 
 For `tensordot` subset, including gradients but **without torch.compile**
 
 ```bash
-pytest tests/test_tapp_torch.py::TestTensordotBs -s
+pytest tests/test_tapp_bs_torch.py::TestTensordotBs -s
 ```
 
 ### Requirements

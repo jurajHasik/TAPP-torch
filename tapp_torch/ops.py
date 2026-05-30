@@ -668,7 +668,9 @@ try:
     from . import _C_cuda
 
     __all__ += ["descriptor_cache_clear", "descriptor_cache_set_max_size",
-                "descriptor_cache_stats", "descriptor_cache_size"]
+                "descriptor_cache_stats", "descriptor_cache_size",
+                "plan_cache_clear", "plan_cache_set_max_size",
+                "plan_cache_stats", "plan_cache_size"]
 
     def descriptor_cache_clear() -> None:
         """Clear all entries from the block-sparse descriptor cache and reset hit/miss counters."""
@@ -695,6 +697,32 @@ try:
         (GPU-internal descriptor memory is not included).
         """
         return _C_cuda.descriptor_cache_size()
+
+    def plan_cache_clear() -> None:
+        """Clear all entries from the block-sparse contraction plan cache and reset hit/miss counters."""
+        _C_cuda.plan_cache_clear()
+
+    def plan_cache_set_max_size(n: int) -> None:
+        """Set the maximum number of entries in the contraction plan cache.
+
+        If the current size exceeds *n*, the least-recently-used entries are evicted
+        immediately.  Pass 0 for unlimited capacity.
+        Defaults to 256 or the value of the ``TAPP_PLAN_CACHE_SIZE`` env var.
+        """
+        _C_cuda.plan_cache_set_max_size(n)
+
+    def plan_cache_stats() -> Tuple[int, int]:
+        """Return ``(hits, misses)`` counters for the block-sparse contraction plan cache."""
+        return _C_cuda.plan_cache_stats()
+
+    def plan_cache_size() -> Tuple[int, int]:
+        """Return ``(count, host_bytes)`` for the contraction plan cache.
+
+        *count* is the number of cached plans.
+        *host_bytes* is the estimated host-side memory used by the cache keys
+        (GPU-internal plan memory is not included).
+        """
+        return _C_cuda.plan_cache_size()
 
 except ImportError:
     pass

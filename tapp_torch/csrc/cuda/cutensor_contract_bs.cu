@@ -101,18 +101,32 @@ namespace tapp_torch {
 
 namespace {
 
-// TODO handle device change
-//
-// Returns the persistent per-thread cuTENSOR handle.
-// cuTENSOR handles must not be used from multiple threads concurrently; a per-thread
-// handle avoids locking while tying handle lifetime to the thread lifetime.
-cutensorHandle_t& get_cutensor_handle() {
-  thread_local struct HandleOwner {
-    cutensorHandle_t handle{};
-    HandleOwner()  { HANDLE_ERROR(cutensorCreate(&handle)); }
-    ~HandleOwner() noexcept { if (handle) cutensorDestroy(handle); }
-  } owner;
-  return owner.handle;
+// Returns the cuTENSOR handle for the current CUDA device, creating one if none exists yet.
+// One handle is shared across all threads for a given device. 
+// When a device switch is detected a fresh handle is created for the new device.
+cutensorHandle_t get_cutensor_handle() {
+  struct HandleMap {
+    std::mutex mutex;
+    std::unordered_map<int, cutensorHandle_t> map;
+    ~HandleMap() {
+      for (auto& [dev, h] : map)
+        if (h) cutensorDestroy(h);
+    }
+  };
+  static HandleMap handles;
+
+  int device;
+  HANDLE_CUDA_ERROR(cudaGetDevice(&device));
+
+  std::lock_guard<std::mutex> lock(handles.mutex);
+  auto it = handles.map.find(device);
+  if (it != handles.map.end())
+    return it->second;
+
+  cutensorHandle_t handle{};
+  HANDLE_ERROR(cutensorCreate(&handle));
+  handles.map[device] = handle;
+  return handle;
 }
 
 template <typename T>
@@ -688,7 +702,7 @@ void tensor_product_bs_cuda_impl(
   const char* env = std::getenv("TAPP_LOG_LEVEL");
   int tapp_log_level = (env) ? std::atoi(env) : 0;
 
-  cutensorHandle_t& handle = get_cutensor_handle();
+  cutensorHandle_t handle = get_cutensor_handle();
 
   cudaStream_t stream;
   if (stream_ptr) {

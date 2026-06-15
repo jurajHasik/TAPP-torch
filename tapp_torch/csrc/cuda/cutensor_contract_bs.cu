@@ -497,6 +497,9 @@ public:
         key.computeDesc
     ));
 
+    // CUTENSOR_OPERATION_DESCRIPTOR_BLOCKSPARSE_REPRODUCIBLE was introduced in
+    // cuTENSOR 2.7.0 (CUTENSOR_VERSION == 20700).
+#if defined(CUTENSOR_VERSION) && CUTENSOR_VERSION >= 20700
     const char* env_reproducible = std::getenv("CUTENSOR_BLOCKSPARSE_REPRODUCIBLE");
     int32_t reproducible = env_reproducible ? std::atoi(env_reproducible) : 0;
     if ((log_level_ >= 6) && (reproducible != 0))
@@ -508,6 +511,7 @@ public:
         &reproducible,
         sizeof(reproducible)
     ));
+#endif
 
     cutensorPlanPreference_t planPref = nullptr;
     // HANDLE_ERROR(cutensorCreatePlanPreference(handle, &planPref, key.algo, key.jitMode));

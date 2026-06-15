@@ -497,6 +497,18 @@ public:
         key.computeDesc
     ));
 
+    const char* env_reproducible = std::getenv("CUTENSOR_BLOCKSPARSE_REPRODUCIBLE");
+    int32_t reproducible = env_reproducible ? std::atoi(env_reproducible) : 0;
+    if ((log_level_ >= 6) && (reproducible != 0))
+      std::cout << "[tapp_torch] plan_cache: Setting CUTENSOR_OPERATION_DESCRIPTOR_BLOCKSPARSE_REPRODUCIBLE="
+                << reproducible << "\n";
+    HANDLE_ERROR(cutensorOperationDescriptorSetAttribute(
+        handle, contractionDesc,
+        CUTENSOR_OPERATION_DESCRIPTOR_BLOCKSPARSE_REPRODUCIBLE,
+        &reproducible,
+        sizeof(reproducible)
+    ));
+
     cutensorPlanPreference_t planPref = nullptr;
     // HANDLE_ERROR(cutensorCreatePlanPreference(handle, &planPref, key.algo, key.jitMode));
 

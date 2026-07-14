@@ -1014,6 +1014,8 @@ void tensor_product_bs_v2_cuda(
   int tapp_log_level = (env) ? std::atoi(env) : 0;
 
   auto t2v = [](const torch::stable::Tensor& t) -> std::vector<int64_t> {
+    STD_TORCH_CHECK(t.is_contiguous(),
+      "One of the block/stride/offset tensors is not contiguous."); 
     const auto* p = static_cast<const int64_t*>(t.const_data_ptr());
     return std::vector<int64_t>(p, p + t.numel());
   };

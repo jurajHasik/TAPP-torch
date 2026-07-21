@@ -756,6 +756,7 @@ void tensor_product_bs_cuda_impl(
     c_modes_32 = d_modes_32;
     c_desc = d_desc;
   }
+  if (tapp_log_level>5) NVTX_MARK("tapp_torch::tensor_product_bs_cuda_impl tensor descriptors");
 
   /*******************************
    * Block-sparse Contraction.   *
@@ -872,6 +873,7 @@ void tensor_product_bs_cuda(
   STD_TORCH_CHECK(alpha_t.defined() && beta_t.defined(), "alpha/beta must be defined");
   STD_TORCH_CHECK(alpha_t.dim() == 0 && beta_t.dim() == 0, "alpha/beta must be 0-dim tensors");
   STD_TORCH_CHECK(alpha_t.scalar_type() == beta_t.scalar_type(), "alpha/beta dtype must match");
+  STD_TORCH_CHECK(a_modes.size()>0 && b_modes.size()>0 && d_modes.size()>0, "Each operand must have at least one mode");
 
   if (C.defined()) {
     STD_TORCH_CHECK(C.dim() == 1, "Tensor C must be 1D.");

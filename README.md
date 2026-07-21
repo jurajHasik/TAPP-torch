@@ -74,6 +74,11 @@ Set to 0 for unlimited cache or to 4 or higher. Default is 1024.
 * Block-sparse contraction descriptor and plan cache: Size can be set via ``TAPP_PLAN_CACHE_SIZE`` environment variable.
 Set to 0 for unlimited cache or to 1 or higher. Default is 256.
 
+## Additional settings
+
+* Set ``CUTENSOR_BLOCKSPARSE_REPRODUCIBLE=1`` for bit-wise reproducibility. Default is 0.
+* Control logging by setting ``TAPP_LOG_LEVEL=<1..6>`` with 6 for highest verbosity level.
+
 ## Installation
 
 ### TL;DR
@@ -98,6 +103,7 @@ pip install --no-build-isolation -e .
 * `TAPP_REFERENCE_USE_TBLIS=ON` to enable TBLIS for dense tensor contractions on `cpu`
 * `TAPP_REFERENCE_TBLIS_SOURCE_DIR=<path-to-tblis-source>` provide custom TBLIS source directory. Default set to `../../tblis`, which is to location of `tblis` submodule with respect to default build directory,
 * `TAPP_FORCE_BUILD=1` to rebuild TAPP i.e. clean default build dir and re-run CMake
+* `CUTENSOR_ROOT=<path-to-cutensor-root-directory>` to use different than default cuTensor installation
 
 Alternatively, go to `third_party/tapp` and build TAPP directly
 

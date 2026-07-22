@@ -7,6 +7,7 @@
 #include <torch/headeronly/macros/Macros.h>
 #include <torch/headeronly/util/shim_utils.h>
 
+#include <array>
 #include <cerrno>
 #include <iostream>
 #include <vector>
@@ -97,6 +98,13 @@ struct Guard
     ~Guard() { if (p) destroy(p); }
 };
 
+// Block-sparse tensor descriptor + contraction-plan caches (Hash512, DescriptorKey,
+// DescriptorCacheImpl, ContractionPlanKeyT, BlockSparseContractionPlanCacheImpl, etc.) live in
+// this header; see its top comment for why it's a header rather than a separate translation unit.
+// Needs HANDLE_ERROR (defined above) and STD_TORCH_CHECK (from the torch includes at the top of
+// this file) to already be visible, hence the include placement here rather than at the very top.
+#include "blocksparse_descriptor_cache.h"
+
 namespace tapp_torch {
 
 namespace {
@@ -182,481 +190,30 @@ inline cutensorComputeDescriptor_t to_cuda_compute_desc(torch::headeronly::Scala
   }
 }
 
-struct DescriptorKey {
-  std::vector<int64_t> numSectionsPerMode;
-  std::vector<int64_t> sectionExtents;
-  std::vector<int64_t> blocks;
-  std::vector<int64_t> strides;
-  cudaDataType_t dataType;
-  bool operator==(const DescriptorKey& o) const {
-    return numSectionsPerMode == o.numSectionsPerMode
-        && sectionExtents    == o.sectionExtents
-        && blocks            == o.blocks
-        && strides           == o.strides
-        && dataType          == o.dataType;
-  }
-};
-
-struct DescriptorKeyHash {
-  size_t operator()(const DescriptorKey& k) const {
-    auto combine = [](size_t seed, size_t h) -> size_t {
-      return seed ^ (h + 0x9e3779b9 + (seed << 6) + (seed >> 2));
-    };
-    auto hash_vec = [&](const std::vector<int64_t>& v) -> size_t {
-      size_t h = v.size();
-      for (auto x : v) h = combine(h, std::hash<int64_t>{}(x));
-      return h;
-    };
-    size_t h = 0;
-    h = combine(h, hash_vec(k.numSectionsPerMode));
-    h = combine(h, hash_vec(k.sectionExtents));
-    h = combine(h, hash_vec(k.blocks));
-    h = combine(h, hash_vec(k.strides));
-    h = combine(h, std::hash<int>{}(static_cast<int>(k.dataType)));
-    return h;
-  }
-};
-
-// Descriptors encode only tensor metadata and are safe to reuse across handle instances.
-// Ownership stays in the cache; callers must NOT call cutensorDestroyBlockSparseTensorDescriptor.
-// max_size=0 means unlimited. Eviction policy: LRU.
-// A single contraction needs up to 4 descriptors (A, B, C, D), so the minimum
-// enforced capacity is MIN_CACHE_SIZE when a finite limit is requested.
-class BlockSparseDescriptorCache {
-public:
-  static constexpr size_t MIN_CACHE_SIZE = 4;
-
-  explicit BlockSparseDescriptorCache(size_t max_size)
-      : max_size_(clamp_cache_size(max_size)) {
-    const char* env = std::getenv("TAPP_LOG_LEVEL");
-    log_level_ = env ? std::atoi(env) : 0;
-    if (log_level_ >= 6)
-      std::cout << "[tapp_torch] desc_cache: created max_size="
-                << (max_size_ == 0 ? "unlimited" : std::to_string(max_size_)) << "\n";
-  }
-
-  void get_or_create(
-      cutensorHandle_t& handle,
-      const std::vector<int64_t>& numSectionsPerMode,
-      const std::vector<int64_t>& sectionExtents,
-      const std::vector<int64_t>& blocks,
-      const std::vector<int64_t>& strides,
-      cudaDataType_t dataType,
-      cutensorBlockSparseTensorDescriptor_t& desc
-  ) {
-    DescriptorKey key{numSectionsPerMode, sectionExtents, blocks, strides, dataType};
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-
-    auto it = map_.find(key);
-    if (it != map_.end()) {
-      ++hits_;
-      lru_list_.splice(lru_list_.begin(), lru_list_, it->second.lru_it);
-      desc = it->second.desc;
-      if (log_level_ >= 6)
-        std::cout << "[tapp_torch] desc_cache: HIT  size=" << map_.size()
-                  << " hits=" << hits_ << " misses=" << misses_ << "\n";
-      return;
-    }
-
-    ++misses_;
-    if (max_size_ > 0 && map_.size() >= max_size_)
-      evict_lru_locked();
-
-    uint32_t nModes  = static_cast<uint32_t>(numSectionsPerMode.size());
-    uint64_t nBlocks = nModes ? static_cast<uint64_t>(blocks.size() / nModes) : 0;
-    if (log_level_ >= 6)
-      std::cout << "[tapp_torch] desc_cache: MISS nModes=" << nModes
-                << " nBlocks=" << nBlocks
-                << " -> creating (size=" << map_.size() + 1 << ")\n";
-
-    std::vector<uint32_t> nSections_u32(numSectionsPerMode.begin(), numSectionsPerMode.end());
-    std::vector<int32_t>  blocks_i32(blocks.begin(), blocks.end());
-    HANDLE_ERROR(cutensorCreateBlockSparseTensorDescriptor(
-        handle, &desc,
-        nModes, nBlocks,
-        nSections_u32.data(),
-        sectionExtents.data(),
-        blocks_i32.data(),
-        strides.data(), dataType
-    ));
-    auto map_it = map_.emplace(std::move(key), Entry{desc, lru_list_.end()}).first;
-    lru_list_.push_front(&map_it->first);
-    map_it->second.lru_it = lru_list_.begin();
-  }
-
-  void clear() {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (log_level_ >= 6)
-      std::cout << "[tapp_torch] desc_cache: CLEAR (was " << map_.size() << " entries)\n";
-    cutensorStatus_t last_err = CUTENSOR_STATUS_SUCCESS;
-    for (auto& [key, entry] : map_) {
-      auto err = cutensorDestroyBlockSparseTensorDescriptor(entry.desc);
-      if (err != CUTENSOR_STATUS_SUCCESS) last_err = err;
-    }
-    map_.clear();
-    lru_list_.clear();
-    hits_ = misses_ = 0;
-    if (last_err != CUTENSOR_STATUS_SUCCESS)
-      throw std::runtime_error{std::string{cutensorGetErrorString(last_err)}};
-  }
-
-  void set_max_size(size_t n) {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    max_size_ = clamp_cache_size(n);
-    if (log_level_ >= 6)
-      std::cout << "[tapp_torch] desc_cache: RESIZE max_size="
-                << (max_size_ == 0 ? "unlimited" : std::to_string(max_size_))
-                << " current=" << map_.size() << "\n";
-    if (max_size_ == 0) return;
-    while (map_.size() > max_size_)
-      evict_lru_locked();
-  }
-
-  std::pair<uint64_t, uint64_t> stats() const {
-    std::shared_lock<std::shared_mutex> lock(mutex_);
-    return {hits_, misses_};
-  }
-
-  std::pair<size_t, size_t> size_info() const {
-    std::shared_lock<std::shared_mutex> lock(mutex_);
-    size_t bytes = 0;
-    for (const auto& [key, entry] : map_)
-      bytes += sizeof(int64_t) * (key.numSectionsPerMode.size() + key.sectionExtents.size()
-                                 + key.blocks.size() + key.strides.size())
-             + sizeof(cudaDataType_t) + sizeof(cutensorBlockSparseTensorDescriptor_t);
-    return {map_.size(), bytes};
-  }
-
-  ~BlockSparseDescriptorCache() noexcept(false) {
-    cutensorStatus_t last_err = CUTENSOR_STATUS_SUCCESS;
-    for (auto& [key, entry] : map_) {
-      auto err = cutensorDestroyBlockSparseTensorDescriptor(entry.desc);
-      if (err != CUTENSOR_STATUS_SUCCESS) last_err = err;
-    }
-    if (last_err != CUTENSOR_STATUS_SUCCESS)
-      throw std::runtime_error{std::string{cutensorGetErrorString(last_err)}};
-  }
-
-private:
-  struct Entry {
-    cutensorBlockSparseTensorDescriptor_t       desc;
-    std::list<const DescriptorKey*>::iterator   lru_it;
-  };
-
-  static size_t clamp_cache_size(size_t n) {
-    return (n > 0 && n < MIN_CACHE_SIZE) ? MIN_CACHE_SIZE : n;
-  }
-
-  void evict_lru_locked() {
-    if (log_level_ >= 6)
-      std::cout << "[tapp_torch] desc_cache: EVICT LRU (size=" << map_.size() - 1 << ")\n";
-    auto it = map_.find(*lru_list_.back());
-    auto desc = it->second.desc;
-    map_.erase(it);
-    lru_list_.pop_back();
-    HANDLE_ERROR(cutensorDestroyBlockSparseTensorDescriptor(desc));
-  }
-
-  int      log_level_ = 0;
-  size_t   max_size_;
-  std::unordered_map<DescriptorKey, Entry, DescriptorKeyHash> map_;
-  std::list<const DescriptorKey*>                             lru_list_;
-  mutable std::shared_mutex                                   mutex_;
-  uint64_t hits_   = 0;
-  uint64_t misses_ = 0;
-};
-
-inline size_t parse_cache_size_env(const char* var, size_t default_val, size_t min_size) {
-  const char* env = std::getenv(var);
-  if (!env) return default_val;
-
-  char* end;
-  errno = 0;
-  long val = std::strtol(env, &end, 10);
-
-  if (end == env || *end != '\0' || errno != 0 || val < 0) {
-    std::cerr << "[tapp_torch] Warning: " << var << "=\"" << env
-              << "\" is not a valid non-negative integer; using default " << default_val << ".\n";
-    return default_val;
-  }
-
-  size_t n = static_cast<size_t>(val);
-  if (n > 0 && n < min_size) {
-    std::cerr << "[tapp_torch] Warning: " << var << "=" << n
-              << " is below the minimum of " << min_size << "; using " << min_size << ".\n";
-    return min_size;
-  }
-
-  return n;
-}
+// Brings in DescriptorKey, DescriptorKeyHash, Hash512, unpack_descriptor_hashes,
+// HashedDescriptorKey, HashedDescriptorKeyHash, DescriptorCacheImpl (+ aliases),
+// ContractionPlanKeyT/ContractionPlanKeyHashT (+ aliases), BlockSparseContractionPlanCacheImpl
+// (+ aliases), and parse_cache_size_env, unqualified — see blocksparse_descriptor_cache.h.
+using namespace blocksparse_cache;
 
 BlockSparseDescriptorCache g_descriptor_cache{
     parse_cache_size_env("TAPP_DESCRIPTOR_CACHE_SIZE", 1024,
                          BlockSparseDescriptorCache::MIN_CACHE_SIZE)};
 
-// ── Contraction descriptor + plan cache ──────────────────────────────────
-// Key covers all inputs to cutensorCreateBlockSparseContraction +
-// cutensorEstimateWorkspaceSize.  The c position always receives d_desc due
-// to a cuTENSOR API limitation, so c_key is always the D descriptor key.
-struct ContractionPlanKey {
-  DescriptorKey        a_key;  std::vector<int32_t> a_modes;
-  DescriptorKey        b_key;  std::vector<int32_t> b_modes;
-  DescriptorKey        c_key;  std::vector<int32_t> c_modes;
-  DescriptorKey        d_key;  std::vector<int32_t> d_modes;
-  cutensorComputeDescriptor_t  computeDesc;
-  cutensorWorksizePreference_t workspacePref;
-  cutensorAlgo_t               algo;
-  cutensorJitMode_t            jitMode;
-
-  bool operator==(const ContractionPlanKey& o) const {
-    return a_key == o.a_key && a_modes == o.a_modes
-        && b_key == o.b_key && b_modes == o.b_modes
-        && c_key == o.c_key && c_modes == o.c_modes
-        && d_key == o.d_key && d_modes == o.d_modes
-        && computeDesc   == o.computeDesc
-        && workspacePref == o.workspacePref
-        && algo    == o.algo
-        && jitMode == o.jitMode;
-  }
-};
-
-struct ContractionPlanKeyHash {
-  size_t operator()(const ContractionPlanKey& k) const {
-    auto combine = [](size_t seed, size_t h) -> size_t {
-      return seed ^ (h + 0x9e3779b9 + (seed << 6) + (seed >> 2));
-    };
-    auto hash_modes = [&](const std::vector<int32_t>& v) -> size_t {
-      size_t h = v.size();
-      for (auto x : v) h = combine(h, std::hash<int32_t>{}(x));
-      return h;
-    };
-    DescriptorKeyHash dkh;
-    size_t h = 0;
-    h = combine(h, dkh(k.a_key)); h = combine(h, hash_modes(k.a_modes));
-    h = combine(h, dkh(k.b_key)); h = combine(h, hash_modes(k.b_modes));
-    h = combine(h, dkh(k.c_key)); h = combine(h, hash_modes(k.c_modes));
-    h = combine(h, dkh(k.d_key)); h = combine(h, hash_modes(k.d_modes));
-    h = combine(h, std::hash<uintptr_t>{}(reinterpret_cast<uintptr_t>(k.computeDesc)));
-    h = combine(h, std::hash<int>{}(static_cast<int>(k.workspacePref)));
-    h = combine(h, std::hash<int>{}(static_cast<int>(k.algo)));
-    h = combine(h, std::hash<int>{}(static_cast<int>(k.jitMode)));
-    return h;
-  }
-};
-
-class BlockSparseContractionPlanCache {
-public:
-  static constexpr size_t MIN_CACHE_SIZE = 1;
-
-  explicit BlockSparseContractionPlanCache(size_t max_size)
-      : max_size_(clamp(max_size)) {
-    const char* env = std::getenv("TAPP_LOG_LEVEL");
-    log_level_ = env ? std::atoi(env) : 0;
-    if (log_level_ >= 6)
-      std::cout << "[tapp_torch] plan_cache: created max_size="
-                << (max_size_ == 0 ? "unlimited" : std::to_string(max_size_)) << "\n";
-  }
-
-  void get_or_create(
-      cutensorHandle_t&                     handle,
-      const ContractionPlanKey&             key,
-      const cutensorBlockSparseTensorDescriptor_t a_desc,
-      const cutensorBlockSparseTensorDescriptor_t b_desc,
-      const cutensorBlockSparseTensorDescriptor_t c_desc,
-      const cutensorBlockSparseTensorDescriptor_t d_desc,
-      cutensorOperationDescriptor_t&        out_contractionDesc,
-      uint64_t&                             out_workspaceSizeEstimate,
-      cutensorPlan_t&                       out_plan
-  ) {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-
-    auto it = map_.find(key);
-    if (it != map_.end()) {
-      ++hits_;
-      lru_list_.splice(lru_list_.begin(), lru_list_, it->second.lru_it);
-      out_contractionDesc       = it->second.cached.contractionDesc;
-      out_workspaceSizeEstimate = it->second.cached.workspaceSizeEstimate;
-      out_plan                  = it->second.cached.plan;
-      if (log_level_ >= 6)
-        std::cout << "[tapp_torch] plan_cache: HIT  size=" << map_.size()
-                  << " hits=" << hits_ << " misses=" << misses_ << "\n";
-      return;
-    }
-
-    ++misses_;
-    if (max_size_ > 0 && map_.size() >= max_size_)
-      evict_lru_locked();
-
-    cutensorOperationDescriptor_t contractionDesc;
-    HANDLE_ERROR(cutensorCreateBlockSparseContraction(
-        handle, &contractionDesc,
-        a_desc, key.a_modes.data(), CUTENSOR_OP_IDENTITY,
-        b_desc, key.b_modes.data(), CUTENSOR_OP_IDENTITY,
-        c_desc, key.c_modes.data(), CUTENSOR_OP_IDENTITY,
-        d_desc, key.d_modes.data(),
-        key.computeDesc
-    ));
-
-    // CUTENSOR_OPERATION_DESCRIPTOR_BLOCKSPARSE_REPRODUCIBLE was introduced in
-    // cuTENSOR 2.7.0 (CUTENSOR_VERSION == 20700).
-#if defined(CUTENSOR_VERSION) && CUTENSOR_VERSION >= 20700
-    const char* env_reproducible = std::getenv("CUTENSOR_BLOCKSPARSE_REPRODUCIBLE");
-    int32_t reproducible = env_reproducible ? std::atoi(env_reproducible) : 0;
-    if ((log_level_ >= 6) && (reproducible != 0))
-      std::cout << "[tapp_torch] plan_cache: Setting CUTENSOR_OPERATION_DESCRIPTOR_BLOCKSPARSE_REPRODUCIBLE="
-                << reproducible << "\n";
-    HANDLE_ERROR(cutensorOperationDescriptorSetAttribute(
-        handle, contractionDesc,
-        CUTENSOR_OPERATION_DESCRIPTOR_BLOCKSPARSE_REPRODUCIBLE,
-        &reproducible,
-        sizeof(reproducible)
-    ));
-#endif
-
-    cutensorPlanPreference_t planPref = nullptr;
-    // HANDLE_ERROR(cutensorCreatePlanPreference(handle, &planPref, key.algo, key.jitMode));
-
-    uint64_t workspaceSizeEstimate;
-    HANDLE_ERROR(cutensorEstimateWorkspaceSize(
-        handle, contractionDesc, planPref, key.workspacePref, &workspaceSizeEstimate
-    ));
-
-    cutensorPlan_t plan;
-    HANDLE_ERROR(cutensorCreatePlan(
-        handle, &plan, contractionDesc, planPref, workspaceSizeEstimate
-    ));
-
-    // HANDLE_ERROR(cutensorDestroyPlanPreference(planPref));
-
-    if (log_level_ >= 6)
-      std::cout << "[tapp_torch] plan_cache: MISS aModes=" << key.a_modes.size()
-                << " bModes=" << key.b_modes.size()
-                << " cModes=" << key.c_modes.size()
-                << " dModes=" << key.d_modes.size()
-                << " workspace=" << workspaceSizeEstimate << "B"
-                << " -> creating (size=" << map_.size() + 1 << ")\n";
-
-    auto map_it = map_.emplace(std::move(key),
-        Entry{Cached{contractionDesc, workspaceSizeEstimate, plan}, lru_list_.end()}).first;
-    lru_list_.push_front(&map_it->first);
-    map_it->second.lru_it = lru_list_.begin();
-
-    out_contractionDesc       = contractionDesc;
-    out_workspaceSizeEstimate = workspaceSizeEstimate;
-    out_plan                  = plan;
-  }
-
-  void clear() {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (log_level_ >= 6)
-      std::cout << "[tapp_torch] plan_cache: CLEAR (was " << map_.size() << " entries)\n";
-    cutensorStatus_t last_err = CUTENSOR_STATUS_SUCCESS;
-    for (auto& [key, entry] : map_) {
-      auto e1 = cutensorDestroyOperationDescriptor(entry.cached.contractionDesc);
-      auto e2 = cutensorDestroyPlan(entry.cached.plan);
-      if (e1 != CUTENSOR_STATUS_SUCCESS) last_err = e1;
-      if (e2 != CUTENSOR_STATUS_SUCCESS) last_err = e2;
-    }
-    map_.clear();
-    lru_list_.clear();
-    hits_ = misses_ = 0;
-    if (last_err != CUTENSOR_STATUS_SUCCESS)
-      throw std::runtime_error{std::string{cutensorGetErrorString(last_err)}};
-  }
-
-  void set_max_size(size_t n) {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    max_size_ = clamp(n);
-    if (log_level_ >= 6)
-      std::cout << "[tapp_torch] plan_cache: RESIZE max_size="
-                << (max_size_ == 0 ? "unlimited" : std::to_string(max_size_))
-                << " current=" << map_.size() << "\n";
-    if (max_size_ == 0) return;
-    while (map_.size() > max_size_)
-      evict_lru_locked();
-  }
-
-  std::pair<uint64_t, uint64_t> stats() const {
-    std::shared_lock<std::shared_mutex> lock(mutex_);
-    return {hits_, misses_};
-  }
-
-  std::pair<size_t, size_t> size_info() const {
-    std::shared_lock<std::shared_mutex> lock(mutex_);
-    size_t bytes = 0;
-    for (const auto& [key, entry] : map_) {
-      auto dkey_bytes = [](const DescriptorKey& dk) {
-        return sizeof(int64_t) * (dk.numSectionsPerMode.size() + dk.sectionExtents.size()
-                                  + dk.blocks.size() + dk.strides.size())
-               + sizeof(cudaDataType_t);
-      };
-      auto modes_bytes = [](const std::vector<int32_t>& v) {
-        return sizeof(int32_t) * v.size();
-      };
-      bytes += dkey_bytes(key.a_key) + modes_bytes(key.a_modes)
-             + dkey_bytes(key.b_key) + modes_bytes(key.b_modes)
-             + dkey_bytes(key.c_key) + modes_bytes(key.c_modes)
-             + dkey_bytes(key.d_key) + modes_bytes(key.d_modes)
-             + sizeof(cutensorComputeDescriptor_t) + sizeof(cutensorWorksizePreference_t)
-             + sizeof(cutensorOperationDescriptor_t) + sizeof(cutensorPlan_t);
-    }
-    return {map_.size(), bytes};
-  }
-
-  ~BlockSparseContractionPlanCache() noexcept(false) {
-    cutensorStatus_t last_err = CUTENSOR_STATUS_SUCCESS;
-    for (auto& [key, entry] : map_) {
-      auto e1 = cutensorDestroyOperationDescriptor(entry.cached.contractionDesc);
-      auto e2 = cutensorDestroyPlan(entry.cached.plan);
-      if (e1 != CUTENSOR_STATUS_SUCCESS) last_err = e1;
-      if (e2 != CUTENSOR_STATUS_SUCCESS) last_err = e2;
-    }
-    if (last_err != CUTENSOR_STATUS_SUCCESS)
-      throw std::runtime_error{std::string{cutensorGetErrorString(last_err)}};
-  }
-
-private:
-  struct Cached {
-    cutensorOperationDescriptor_t contractionDesc;
-    uint64_t                      workspaceSizeEstimate;
-    cutensorPlan_t                plan;
-  };
-  struct Entry {
-    Cached                                            cached;
-    std::list<const ContractionPlanKey*>::iterator    lru_it;
-  };
-
-  static size_t clamp(size_t n) {
-    return (n > 0 && n < MIN_CACHE_SIZE) ? MIN_CACHE_SIZE : n;
-  }
-
-  void evict_lru_locked() {
-    if (log_level_ >= 6)
-      std::cout << "[tapp_torch] plan_cache: EVICT LRU (size=" << map_.size() - 1 << ")\n";
-    auto it = map_.find(*lru_list_.back());
-    auto cached = it->second.cached;
-    map_.erase(it);
-    lru_list_.pop_back();
-    auto e1 = cutensorDestroyOperationDescriptor(cached.contractionDesc);
-    auto e2 = cutensorDestroyPlan(cached.plan);
-    if (e1 != CUTENSOR_STATUS_SUCCESS)
-      throw std::runtime_error{std::string{cutensorGetErrorString(e1)}};
-    if (e2 != CUTENSOR_STATUS_SUCCESS)
-      throw std::runtime_error{std::string{cutensorGetErrorString(e2)}};
-  }
-
-  int      log_level_ = 0;
-  size_t   max_size_;
-  std::unordered_map<ContractionPlanKey, Entry, ContractionPlanKeyHash> map_;
-  std::list<const ContractionPlanKey*>                                  lru_list_;
-  mutable std::shared_mutex                                             mutex_;
-  uint64_t hits_   = 0;
-  uint64_t misses_ = 0;
-};
+// Parallel cache used when the caller supplies precomputed Hash512 digests (see
+// tensor_product_bs_v2's descriptor_key_hashes argument). Shares the same size env var as
+// g_descriptor_cache; the two are independent maps so combined memory usage can be up to 2x.
+HashedDescriptorCache g_descriptor_cache_hashed{
+    parse_cache_size_env("TAPP_DESCRIPTOR_CACHE_SIZE", 1024,
+                         HashedDescriptorCache::MIN_CACHE_SIZE)};
 
 BlockSparseContractionPlanCache g_contraction_plan_cache{
     parse_cache_size_env("TAPP_PLAN_CACHE_SIZE", 256,
                          BlockSparseContractionPlanCache::MIN_CACHE_SIZE)};
+
+HashedBlockSparseContractionPlanCache g_contraction_plan_cache_hashed{
+    parse_cache_size_env("TAPP_PLAN_CACHE_SIZE", 256,
+                         HashedBlockSparseContractionPlanCache::MIN_CACHE_SIZE)};
 
 void wrap_BlockSparseTensorDescriptor(
     cutensorHandle_t& handle,
@@ -665,10 +222,18 @@ void wrap_BlockSparseTensorDescriptor(
     const std::vector<int64_t>& blocks,
     const std::vector<int64_t>& strides,
     cudaDataType_t dataType,
-    cutensorBlockSparseTensorDescriptor_t& desc
+    cutensorBlockSparseTensorDescriptor_t& desc,
+    const Hash512* precomputed_hash = nullptr
 ) {
-  g_descriptor_cache.get_or_create(
-      handle, numSectionsPerMode, sectionExtents, blocks, strides, dataType, desc);
+  if (precomputed_hash) {
+    HashedDescriptorKey key{*precomputed_hash, dataType};
+    g_descriptor_cache_hashed.get_or_create(
+        handle, key, numSectionsPerMode, sectionExtents, blocks, strides, dataType, desc);
+  } else {
+    DescriptorKey key{numSectionsPerMode, sectionExtents, blocks, strides, dataType};
+    g_descriptor_cache.get_or_create(
+        handle, key, numSectionsPerMode, sectionExtents, blocks, strides, dataType, desc);
+  }
 }
 
 } // end anonymous namespace
@@ -713,7 +278,12 @@ void tensor_product_bs_cuda_impl(
     const scalar_t beta,
     cutensorComputeDescriptor_t computeDesc,
     cudaDataType_t dtype,
-    cudaStream_t* stream_ptr = nullptr
+    cudaStream_t* stream_ptr = nullptr,
+    // Caller-supplied descriptor-key digests for A, B, D (in that order). When present, these
+    // are trusted as a full identity for the descriptor/plan caches, bypassing the O(nBlocks)
+    // hashing (and, on hit, equality checking) of the sectionsPerMode/sectionExtents/blocks/strides
+    // arrays that DescriptorKeyHash/DescriptorKey::operator== would otherwise perform.
+    const std::array<Hash512, 3>* descriptor_hashes = nullptr
 ) {
   const char* env = std::getenv("TAPP_LOG_LEVEL");
   int tapp_log_level = (env) ? std::atoi(env) : 0;
@@ -722,7 +292,7 @@ void tensor_product_bs_cuda_impl(
 
   cudaStream_t stream;
   if (stream_ptr) {
-    stream = *stream_ptr;  
+    stream = *stream_ptr;
   } else {
     HANDLE_CUDA_ERROR(cudaStreamCreate(&stream));
   }
@@ -736,21 +306,21 @@ void tensor_product_bs_cuda_impl(
   // Get descriptors
   cutensorBlockSparseTensorDescriptor_t a_desc, b_desc, c_desc, d_desc;
   wrap_BlockSparseTensorDescriptor(
-    handle, a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, 
-    dtype, a_desc);
+    handle, a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides,
+    dtype, a_desc, descriptor_hashes ? &(*descriptor_hashes)[0] : nullptr);
   wrap_BlockSparseTensorDescriptor(
-    handle, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, 
-    dtype, b_desc);
+    handle, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides,
+    dtype, b_desc, descriptor_hashes ? &(*descriptor_hashes)[1] : nullptr);
   wrap_BlockSparseTensorDescriptor(
-    handle, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, 
-    dtype, d_desc);
+    handle, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides,
+    dtype, d_desc, descriptor_hashes ? &(*descriptor_hashes)[2] : nullptr);
   if (C.has_value()) {
-    STD_TORCH_CHECK(c_modes.has_value() && c_numSectionsPerMode.has_value() 
+    STD_TORCH_CHECK(c_modes.has_value() && c_numSectionsPerMode.has_value()
       && c_sectionExtents.has_value() && c_blocks.has_value() && c_strides.has_value(),
       "If C is defined, all of c_modes, c_numSectionsPerMode, c_sectionExtents, c_blocks, and c_strides must be provided");
     c_modes_32 = std::vector<int32_t>(c_modes->begin(), c_modes->end());
     wrap_BlockSparseTensorDescriptor(
-        handle, c_numSectionsPerMode.value(), c_sectionExtents.value(), 
+        handle, c_numSectionsPerMode.value(), c_sectionExtents.value(),
         c_blocks.value(), c_strides.value(), dtype, c_desc);
   } else {
     c_modes_32 = d_modes_32;
@@ -765,27 +335,48 @@ void tensor_product_bs_cuda_impl(
   // Retrieve (or create) contraction descriptor + plan from cache.
   // NOTE: cuTENSOR API limitation — d_desc is always passed in the C-tensor position.
   //       See https://docs.nvidia.com/cuda/cutensor/latest/api/cutensor.html#cutensorcreateblocksparsecontractiondescriptor
-  ContractionPlanKey plan_key{
-      DescriptorKey{a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, dtype},
-      a_modes_32,
-      DescriptorKey{b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, dtype},
-      b_modes_32,
-      DescriptorKey{d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, dtype},
-      c_modes_32,
-      DescriptorKey{d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, dtype},
-      d_modes_32,
-      computeDesc,
-      CUTENSOR_WORKSPACE_DEFAULT,
-      CUTENSOR_ALGO_DEFAULT,
-      CUTENSOR_JIT_MODE_NONE
-  };
   cutensorOperationDescriptor_t contractionDesc;
   uint64_t workspaceSizeEstimate;
   cutensorPlan_t plan;
-  g_contraction_plan_cache.get_or_create(
-      handle, plan_key,
-      a_desc, b_desc, d_desc, d_desc,
-      contractionDesc, workspaceSizeEstimate, plan);
+  if (descriptor_hashes) {
+    HashedContractionPlanKey plan_key{
+        HashedDescriptorKey{(*descriptor_hashes)[0], dtype},
+        a_modes_32,
+        HashedDescriptorKey{(*descriptor_hashes)[1], dtype},
+        b_modes_32,
+        HashedDescriptorKey{(*descriptor_hashes)[2], dtype},
+        c_modes_32,
+        HashedDescriptorKey{(*descriptor_hashes)[2], dtype},
+        d_modes_32,
+        computeDesc,
+        CUTENSOR_WORKSPACE_DEFAULT,
+        CUTENSOR_ALGO_DEFAULT,
+        CUTENSOR_JIT_MODE_NONE
+    };
+    g_contraction_plan_cache_hashed.get_or_create(
+        handle, plan_key,
+        a_desc, b_desc, d_desc, d_desc,
+        contractionDesc, workspaceSizeEstimate, plan);
+  } else {
+    ContractionPlanKey plan_key{
+        DescriptorKey{a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, dtype},
+        a_modes_32,
+        DescriptorKey{b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, dtype},
+        b_modes_32,
+        DescriptorKey{d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, dtype},
+        c_modes_32,
+        DescriptorKey{d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, dtype},
+        d_modes_32,
+        computeDesc,
+        CUTENSOR_WORKSPACE_DEFAULT,
+        CUTENSOR_ALGO_DEFAULT,
+        CUTENSOR_JIT_MODE_NONE
+    };
+    g_contraction_plan_cache.get_or_create(
+        handle, plan_key,
+        a_desc, b_desc, d_desc, d_desc,
+        contractionDesc, workspaceSizeEstimate, plan);
+  }
   if (tapp_log_level>5) NVTX_MARK("tapp_torch::tensor_product_bs_cuda_impl plan cache");
 
   // See https://docs.nvidia.com/cuda/cutensor/latest/api/cutensor.html#cutensorcontract 
@@ -821,45 +412,63 @@ void tensor_product_bs_cuda_impl(
 
 // NOTE Assume blocks are stored in contiguous memory associated with a single dense tensor.
 //      Blocks as ArrayRef[Tensor], i.e. each block backed by an independent tensor can also be supported in the future.
-void tensor_product_bs_cuda(
-    const torch::stable::Tensor& A,         // 1D 
+// Shared by both the "tensor_product_bs" and "tensor_product_bs_v2" op impls (see below); the
+// registered "tensor_product_bs" op always passes descriptor_key_hashes=nullopt so its schema
+// is unaffected by the hashing fast path added for v2.
+void tensor_product_bs_cuda_dispatch(
+    const torch::stable::Tensor& A,         // 1D
     const torch::stable::Tensor& B,
     const torch::stable::Tensor& C,
     torch::stable::Tensor& D,
     const std::vector<int64_t>& a_modes,              // mode labels of A
-    const std::vector<int64_t>& a_numSectionsPerMode, // number of sections per mode of A     
+    const std::vector<int64_t>& a_numSectionsPerMode, // number of sections per mode of A
     const std::vector<int64_t>& a_sectionExtents,     // extents of the sections in modes of A
     const std::vector<int64_t>& a_blocks,             // Coordinates of the non-zero blocks in the tensor, which are specified as a vector of indices
                                                       // with respect to sectionExtents already serialized into 1D, i.e.
                                                       // { { x0_0, x0_1, ..., x0_#modes-1 },
                                                       //   { x1_0,       ..., x1_#modes-1 },
-                                                      //   ...                               } is given as 
+                                                      //   ...                               } is given as
                                                       // { x0_0, x0_1, ..., x0_#modes-1, x1_0, ..., x1_#modes-1, ... }
-    const std::vector<int64_t>& a_strides,  
+    const std::vector<int64_t>& a_strides,
     const std::vector<int64_t>& a_offsets,  // offsets of the blocks in the flattened storage of a
     const std::vector<int64_t>& b_modes,
-    const std::vector<int64_t>& b_numSectionsPerMode, 
+    const std::vector<int64_t>& b_numSectionsPerMode,
     const std::vector<int64_t>& b_sectionExtents,
     const std::vector<int64_t>& b_blocks,
-    const std::vector<int64_t>& b_strides,  
+    const std::vector<int64_t>& b_strides,
     const std::vector<int64_t>& b_offsets,
     const std::optional<std::vector<int64_t>>& c_modes,
-    const std::optional<std::vector<int64_t>>& c_numSectionsPerMode, 
+    const std::optional<std::vector<int64_t>>& c_numSectionsPerMode,
     const std::optional<std::vector<int64_t>>& c_sectionExtents,
     const std::optional<std::vector<int64_t>>& c_blocks,
     const std::optional<std::vector<int64_t>>& c_strides,
     const std::optional<std::vector<int64_t>>& c_offsets,
     const std::vector<int64_t>& d_modes,
-    const std::vector<int64_t>& d_numSectionsPerMode, 
+    const std::vector<int64_t>& d_numSectionsPerMode,
     const std::vector<int64_t>& d_sectionExtents,
     const std::vector<int64_t>& d_blocks,
-    const std::vector<int64_t>& d_strides,  
+    const std::vector<int64_t>& d_strides,
     const std::vector<int64_t>& d_offsets,
     const torch::stable::Tensor& alpha_t,
-    const torch::stable::Tensor& beta_t
+    const torch::stable::Tensor& beta_t,
+    // Flat int64[24] = 3 consecutive 512-bit hashes (A, B, D); see Hash512/unpack_descriptor_hashes.
+    const std::optional<std::vector<int64_t>>& descriptor_key_hashes = std::nullopt
 ) {
   const char* env = std::getenv("TAPP_LOG_LEVEL");
   int tapp_log_level = (env) ? std::atoi(env) : 0;
+
+  // Debugging escape hatch: force the strictly-correct, vector-keyed cache path (full array
+  // equality on every lookup) regardless of any caller-supplied descriptor_key_hashes. Lets a
+  // developer verify a caller's hash computation is actually correct by comparing results with
+  // and without this set.
+  const char* strict_env = std::getenv("TAPP_CACHE_STRICT");
+  bool cache_strict = strict_env && std::atoi(strict_env) != 0;
+
+  std::optional<std::array<Hash512, 3>> descriptor_hashes;
+  if (descriptor_key_hashes.has_value() && !cache_strict)
+    descriptor_hashes = unpack_descriptor_hashes(descriptor_key_hashes.value());
+  if (cache_strict && descriptor_key_hashes.has_value() && tapp_log_level > 5)
+    std::cout << "[tapp_torch] TAPP_CACHE_STRICT=1: ignoring caller-supplied descriptor_key_hashes\n";
 
   STD_TORCH_CHECK(A.dim() == 1, "Tensor A must be 1D.");
   STD_TORCH_CHECK(B.dim() == 1, "Tensor B must be 1D.");
@@ -942,7 +551,8 @@ void tensor_product_bs_cuda(
         b_modes, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides,
         c_modes, c_numSectionsPerMode, c_sectionExtents, c_blocks, c_strides,
         d_modes, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides,
-        alpha, beta, to_cuda_compute_desc(D.scalar_type()), to_cuda_dtype(D.scalar_type()), &stream
+        alpha, beta, to_cuda_compute_desc(D.scalar_type()), to_cuda_dtype(D.scalar_type()), &stream,
+        descriptor_hashes ? &descriptor_hashes.value() : nullptr
     );
   };
 
@@ -975,6 +585,47 @@ switch (D.scalar_type()) {
     default:
         throw std::runtime_error("Unsupported dtype alpha/beta for TAPP contraction");
 }
+}
+
+// Registered "tensor_product_bs" op impl: thin wrapper, no descriptor-key-hashing fast path.
+void tensor_product_bs_cuda(
+    const torch::stable::Tensor& A,
+    const torch::stable::Tensor& B,
+    const torch::stable::Tensor& C,
+    torch::stable::Tensor& D,
+    const std::vector<int64_t>& a_modes,
+    const std::vector<int64_t>& a_numSectionsPerMode,
+    const std::vector<int64_t>& a_sectionExtents,
+    const std::vector<int64_t>& a_blocks,
+    const std::vector<int64_t>& a_strides,
+    const std::vector<int64_t>& a_offsets,
+    const std::vector<int64_t>& b_modes,
+    const std::vector<int64_t>& b_numSectionsPerMode,
+    const std::vector<int64_t>& b_sectionExtents,
+    const std::vector<int64_t>& b_blocks,
+    const std::vector<int64_t>& b_strides,
+    const std::vector<int64_t>& b_offsets,
+    const std::optional<std::vector<int64_t>>& c_modes,
+    const std::optional<std::vector<int64_t>>& c_numSectionsPerMode,
+    const std::optional<std::vector<int64_t>>& c_sectionExtents,
+    const std::optional<std::vector<int64_t>>& c_blocks,
+    const std::optional<std::vector<int64_t>>& c_strides,
+    const std::optional<std::vector<int64_t>>& c_offsets,
+    const std::vector<int64_t>& d_modes,
+    const std::vector<int64_t>& d_numSectionsPerMode,
+    const std::vector<int64_t>& d_sectionExtents,
+    const std::vector<int64_t>& d_blocks,
+    const std::vector<int64_t>& d_strides,
+    const std::vector<int64_t>& d_offsets,
+    const torch::stable::Tensor& alpha_t,
+    const torch::stable::Tensor& beta_t
+) {
+  tensor_product_bs_cuda_dispatch(A, B, C, D,
+      a_modes, a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets,
+      b_modes, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
+      c_modes, c_numSectionsPerMode, c_sectionExtents, c_blocks, c_strides, c_offsets,
+      d_modes, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets,
+      alpha_t, beta_t, std::nullopt);
 }
 
 // v2: blocks/strides/offsets arrive as CPU int64 Tensors; unpack via bulk memcpy then delegate.
@@ -1010,14 +661,18 @@ void tensor_product_bs_v2_cuda(
     const torch::stable::Tensor& d_strides_t,
     const torch::stable::Tensor& d_offsets_t,
     const torch::stable::Tensor& alpha_t,
-    const torch::stable::Tensor& beta_t
+    const torch::stable::Tensor& beta_t,
+    // Flat int64[24] = 3 consecutive 512-bit hashes (A, B, D), each covering that tensor's
+    // sectionsPerMode+sectionExtents+blocks+strides. Caller guarantees uniqueness; when provided,
+    // these replace the (O(nBlocks)) DescriptorKeyHash computation in the descriptor/plan caches.
+    const std::optional<std::vector<int64_t>>& descriptor_key_hashes
 ) {
   const char* env = std::getenv("TAPP_LOG_LEVEL");
   int tapp_log_level = (env) ? std::atoi(env) : 0;
 
   auto t2v = [](const torch::stable::Tensor& t) -> std::vector<int64_t> {
     STD_TORCH_CHECK(t.is_contiguous(),
-      "One of the block/stride/offset tensors is not contiguous."); 
+      "One of the block/stride/offset tensors is not contiguous.");
     const auto* p = static_cast<const int64_t*>(t.const_data_ptr());
     return std::vector<int64_t>(p, p + t.numel());
   };
@@ -1030,12 +685,12 @@ void tensor_product_bs_v2_cuda(
   }
   if (tapp_log_level>5) NVTX_MARK( "tapp_torch::tensor_product_bs_cuda_v2 t2v" );
 
-  tensor_product_bs_cuda(A, B, C, D,
+  tensor_product_bs_cuda_dispatch(A, B, C, D,
     a_modes, a_numSectionsPerMode, a_sectionExtents, t2v(a_blocks_t), t2v(a_strides_t), t2v(a_offsets_t),
     b_modes, b_numSectionsPerMode, b_sectionExtents, t2v(b_blocks_t), t2v(b_strides_t), t2v(b_offsets_t),
     c_modes, c_numSectionsPerMode, c_sectionExtents, c_blocks, c_strides, c_offsets,
     d_modes, d_numSectionsPerMode, d_sectionExtents, t2v(d_blocks_t), t2v(d_strides_t), t2v(d_offsets_t),
-    alpha_t, beta_t);
+    alpha_t, beta_t, descriptor_key_hashes);
 }
 
 // Registers CUDA implementation
@@ -1048,40 +703,52 @@ STABLE_TORCH_LIBRARY_IMPL(tapp_torch, CUDA, m) {
 // These ops carry no tensor arguments so they dispatch via the CPU key.
 // The cache itself is process-global; ops are available after _C_cuda is loaded.
 
+// Each management op below covers both the vector-keyed cache and its Hash512-keyed sibling
+// (populated when callers pass descriptor_key_hashes to tensor_product_bs_v2), so callers don't
+// need to know which path produced a given cache entry.
+
 void descriptor_cache_clear_impl() {
   g_descriptor_cache.clear();
+  g_descriptor_cache_hashed.clear();
 }
 
 void descriptor_cache_set_max_size_impl(int64_t n) {
   g_descriptor_cache.set_max_size(static_cast<size_t>(n));
+  g_descriptor_cache_hashed.set_max_size(static_cast<size_t>(n));
 }
 
 std::tuple<int64_t, int64_t> descriptor_cache_stats_impl() {
   auto [hits, misses] = g_descriptor_cache.stats();
-  return {static_cast<int64_t>(hits), static_cast<int64_t>(misses)};
+  auto [hashed_hits, hashed_misses] = g_descriptor_cache_hashed.stats();
+  return {static_cast<int64_t>(hits + hashed_hits), static_cast<int64_t>(misses + hashed_misses)};
 }
 
 std::tuple<int64_t, int64_t> descriptor_cache_size_impl() {
   auto [count, bytes] = g_descriptor_cache.size_info();
-  return {static_cast<int64_t>(count), static_cast<int64_t>(bytes)};
+  auto [hashed_count, hashed_bytes] = g_descriptor_cache_hashed.size_info();
+  return {static_cast<int64_t>(count + hashed_count), static_cast<int64_t>(bytes + hashed_bytes)};
 }
 
 void plan_cache_clear_impl() {
   g_contraction_plan_cache.clear();
+  g_contraction_plan_cache_hashed.clear();
 }
 
 void plan_cache_set_max_size_impl(int64_t n) {
   g_contraction_plan_cache.set_max_size(static_cast<size_t>(n));
+  g_contraction_plan_cache_hashed.set_max_size(static_cast<size_t>(n));
 }
 
 std::tuple<int64_t, int64_t> plan_cache_stats_impl() {
   auto [hits, misses] = g_contraction_plan_cache.stats();
-  return {static_cast<int64_t>(hits), static_cast<int64_t>(misses)};
+  auto [hashed_hits, hashed_misses] = g_contraction_plan_cache_hashed.stats();
+  return {static_cast<int64_t>(hits + hashed_hits), static_cast<int64_t>(misses + hashed_misses)};
 }
 
 std::tuple<int64_t, int64_t> plan_cache_size_impl() {
   auto [count, bytes] = g_contraction_plan_cache.size_info();
-  return {static_cast<int64_t>(count), static_cast<int64_t>(bytes)};
+  auto [hashed_count, hashed_bytes] = g_contraction_plan_cache_hashed.size_info();
+  return {static_cast<int64_t>(count + hashed_count), static_cast<int64_t>(bytes + hashed_bytes)};
 }
 
 } // namespace tapp_torch

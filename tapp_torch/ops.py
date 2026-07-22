@@ -480,8 +480,16 @@ def tensor_product_bs_v2(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
         c_blocks: Union[Tensor,None], c_strides: Union[Tensor,None], c_offsets: Union[Tensor,None],
         d_modes: Sequence[int], d_numSectionsPerMode: Sequence[int], d_sectionExtents: Sequence[int],
         d_blocks: Tensor, d_strides: Tensor, d_offsets: Tensor,
-        alpha: Union[float,complex,Tensor,None], beta: Union[float,complex,Tensor,None]) -> None:
-    """Like tensor_product_bs but block/stride/offset metadata are int64 CPU Tensors."""
+        alpha: Union[float,complex,Tensor,None], beta: Union[float,complex,Tensor,None],
+        descriptor_key_hashes: Optional[Sequence[int]] = None) -> None:
+    """Like tensor_product_bs but block/stride/offset metadata are int64 CPU Tensors.
+
+    descriptor_key_hashes, if given, is a flat sequence of 24 ints: 3 consecutive 512-bit
+    (8 x int64) digests, one each for the A, B, D descriptor keys (numSectionsPerMode +
+    sectionExtents + blocks + strides). The caller must guarantee each digest is unique to that
+    combination; when provided, it is used in place of hashing those (potentially very large)
+    arrays on the C++ side for descriptor/contraction-plan cache lookups.
+    """
     alpha_t, beta_t = None, None
     if isinstance(alpha, Tensor):
         alpha_t = alpha
@@ -503,7 +511,7 @@ def tensor_product_bs_v2(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
         b_modes, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
         c_modes, c_numSectionsPerMode, c_sectionExtents, c_blocks, c_strides, c_offsets,
         d_modes, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets,
-        alpha_t, beta_t)
+        alpha_t, beta_t, descriptor_key_hashes)
     if TAPP_LOG_LEVEL > 5:
         torch.cuda.nvtx.range_pop()
 
@@ -520,6 +528,20 @@ def _tensordot_bs_v2_output_size(d_numSectionsPerMode, d_sectionExtents, d_block
         [d_sectionExtents_unflattened[i][extent] for i, extent in enumerate(last_block)])
 
 
+def _reorder_descriptor_hashes(hashes: Optional[Sequence[int]], order: Sequence[int]) -> Optional[List[int]]:
+    """Reslices a flat 3x8-int64 descriptor_key_hashes buffer into a new (a, b, d) order.
+
+    tensordot_bs_v2's forward hashes are given in (A, B, D) order; the backward pass reuses the
+    same three underlying block-sparse structures (A, B, D) but in different a/b/d argument
+    positions for its two tensor_product_bs_v2 calls, so the digests must be reordered rather
+    than recomputed.
+    """
+    if hashes is None:
+        return None
+    chunks = [hashes[i * 8:(i + 1) * 8] for i in range(3)]
+    return [x for i in order for x in chunks[i]]
+
+
 @torch.library.custom_op("tapp_torch::tensordot_bs_v2", mutates_args=())
 def tensordot_bs_v2(A: Tensor, B: Tensor,
         contracted_modes_A: List[int], contracted_modes_B: List[int],
@@ -529,10 +551,14 @@ def tensordot_bs_v2(A: Tensor, B: Tensor,
         b_blocks: Tensor, b_strides: Tensor, b_offsets: Tensor,
         d_numSectionsPerMode: List[int], d_sectionExtents: List[int],
         d_blocks: Tensor, d_strides: Tensor, d_offsets: Tensor,
-        modes_out: Optional[List[int]] = None) -> Tensor:
+        modes_out: Optional[List[int]] = None,
+        descriptor_key_hashes: Optional[List[int]] = None) -> Tensor:
     """
     Like tensordot_bs but block/stride/offset metadata are int64 CPU Tensors,
     eliminating per-element IValue boxing overhead for large block arrays.
+
+    descriptor_key_hashes, if given, is a flat list of 24 ints: 3 consecutive 512-bit (8xint64)
+    digests for the A, B, D descriptor keys, in that order. See tensor_product_bs_v2.
     """
     if TAPP_LOG_LEVEL > 5:
         torch.cuda.nvtx.mark("TAPP_tensordot_bs_v2_mode_reindex_start")
@@ -560,7 +586,7 @@ def tensordot_bs_v2(A: Tensor, B: Tensor,
         modes_B, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
         None, None, None, None, None, None,
         modes_D, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets,
-        1., 0.)
+        1., 0., descriptor_key_hashes)
     return D
 
 
@@ -569,7 +595,7 @@ def _(A, B, contracted_modes_A, contracted_modes_B,
       a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets,
       b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
       d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets,
-      modes_out=None):
+      modes_out=None, descriptor_key_hashes=None):
     output_shape = _tensordot_bs_v2_output_size(d_numSectionsPerMode, d_sectionExtents,
                                                  d_blocks, d_offsets)
     return torch.empty(output_shape, dtype=A.dtype, device=A.device)
@@ -584,6 +610,7 @@ def _backward_tensordot_bs_v2(ctx, grad_D):
     cidx_fwd_a = ctx.contracted_modes_A
     cidx_fwd_b = ctx.contracted_modes_B
     out_modes   = ctx.modes_out
+    fwd_hashes  = ctx.descriptor_key_hashes
     grad_A, grad_B = None, None
 
     ndim_A, ndim_B, ndim_D = len(a_numSectionsPerMode), len(b_numSectionsPerMode), len(d_numSectionsPerMode)
@@ -612,7 +639,8 @@ def _backward_tensordot_bs_v2(ctx, grad_D):
             modes_B,  *ctx.struct_B,
             *(None,) * 6,
             modes_gA, *ctx.struct_A,
-            alpha=1., beta=0.)
+            alpha=1., beta=0.,
+            descriptor_key_hashes=_reorder_descriptor_hashes(fwd_hashes, (2, 1, 0)))
 
     if ctx.needs_input_grad[1]:
         cidx_bwd_a = oidx_fwd_a
@@ -632,16 +660,18 @@ def _backward_tensordot_bs_v2(ctx, grad_D):
             modes_gD, *ctx.struct_D,
             *(None,) * 6,
             modes_gB, *ctx.struct_B,
-            alpha=1.0, beta=0.0)
+            alpha=1.0, beta=0.0,
+            descriptor_key_hashes=_reorder_descriptor_hashes(fwd_hashes, (0, 2, 1)))
 
-    return grad_A, grad_B, *(None,) * 18
+    return grad_A, grad_B, *(None,) * 19
 
 
 def _setup_context_tensordot_bs_v2(ctx, inputs, output):
     A, B, contracted_modes_A, contracted_modes_B, \
         a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets, \
         b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets, \
-        d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets, modes_out = inputs
+        d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets, \
+        modes_out, descriptor_key_hashes = inputs
     ctx.shape_A, ctx.shape_B = A.shape, B.shape
     ctx.struct_A = a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets
     ctx.struct_B = b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets
@@ -649,6 +679,7 @@ def _setup_context_tensordot_bs_v2(ctx, inputs, output):
     ctx.contracted_modes_A = contracted_modes_A
     ctx.contracted_modes_B = contracted_modes_B
     ctx.modes_out = modes_out
+    ctx.descriptor_key_hashes = descriptor_key_hashes
 
     saved_a, saved_b = None, None
     if ctx.needs_input_grad[0]:

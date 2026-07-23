@@ -379,16 +379,37 @@ void tensor_product_bs_cuda_impl(
   }
   if (tapp_log_level>5) NVTX_MARK("tapp_torch::tensor_product_bs_cuda_impl plan cache");
 
-  // See https://docs.nvidia.com/cuda/cutensor/latest/api/cutensor.html#cutensorcontract 
+  // See https://docs.nvidia.com/cuda/cutensor/latest/api/cutensor.html#cutensorcontract
   // for details on workspace allocation alignment requirements.
-  auto workspace = cuda_async_alloc<char>(workspaceSizeEstimate, stream);
+  //
+  // Back the cuTENSOR workspace with PyTorch's caching allocator (stable-ABI
+  // torch::stable::empty) instead of cudaMallocAsync. This draws from the *same*
+  // stream-ordered pool as every other torch tensor, so cuTENSOR and PyTorch no
+  // longer contend for two separate device pools. The uint8 scratch tensor is
+  // allocated on the current CUDA stream; its destructor frees back to the caching
+  // allocator with stream-ordered semantics, so the buffer is not reused until the contraction completes.
+  // The workspace goes on the current CUDA device, which
+  // PyTorch's DeviceGuard has already set to the output tensor's device (the same
+  // device that owns `stream`).
+  torch::stable::Tensor workspace_t;   // undefined/empty when size == 0
+  void* workspace_ptr = nullptr;
+  if (workspaceSizeEstimate > 0) {
+    int ws_device = 0;
+    HANDLE_CUDA_ERROR(cudaGetDevice(&ws_device));
+    workspace_t = torch::stable::empty(
+        { static_cast<int64_t>(workspaceSizeEstimate) },
+        torch::headeronly::ScalarType::Byte,           // uint8 scratch bytes
+        std::nullopt,                                  // default (Strided) layout
+        torch::stable::Device(torch::headeronly::DeviceType::CUDA, ws_device));
+    workspace_ptr = workspace_t.mutable_data_ptr();
+  }
 
   if (tapp_log_level>5) NVTX_MARK( "tapp_torch::cutensorBlockSparseContract start" );
   HANDLE_ERROR(cutensorBlockSparseContract(handle, plan,
               (const void*) &alpha, (const void *const *) A.data(), (const void *const *) B.data(),
-              (const void*) &beta,  (const void *const *) (C.has_value() ? C.value().data() : D.data()), 
-              (void *const *) D.data(), 
-              (void*) workspace.get(), workspaceSizeEstimate, stream));
+              (const void*) &beta,  (const void *const *) (C.has_value() ? C.value().data() : D.data()),
+              (void *const *) D.data(),
+              (void*) workspace_ptr, workspaceSizeEstimate, stream));
 
   if (!stream_ptr) {
     HANDLE_CUDA_ERROR(cudaStreamDestroy(stream));

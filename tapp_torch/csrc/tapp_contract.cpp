@@ -272,6 +272,17 @@ STABLE_TORCH_LIBRARY(tapp_torch, m) {
     "int[]? c_modes, int[]? c_numSectionsPerMode, int[]? c_sectionExtents, int[]? c_blocks, int[]? c_strides, int[]? c_offsets, "
     "int[] d_modes, int[] d_numSectionsPerMode, int[] d_sectionExtents, int[] d_blocks, int[] d_strides, int[] d_offsets, "
     "Tensor alpha, Tensor beta) -> ()");
+  // v2: blocks/strides/offsets passed as Tensor (int64) to avoid per-element IValue boxing overhead
+  // descriptor_key_hashes (optional): flat int64[24] = 3 consecutive 512-bit (8xint64) hashes,
+  // one each for the A, B, D block-sparse descriptor keys (sectionsPerMode+sectionExtents+blocks+strides).
+  // When provided, these caller-supplied hashes are used to look up the descriptor/contraction-plan
+  // caches directly instead of hashing the (potentially very large) blocks/strides arrays on device.
+  m.def("tensor_product_bs_v2(Tensor a, Tensor b, Tensor c, Tensor(t!) out, "
+    "int[] a_modes, int[] a_numSectionsPerMode, int[] a_sectionExtents, Tensor a_blocks, Tensor a_strides, Tensor a_offsets, "
+    "int[] b_modes, int[] b_numSectionsPerMode, int[] b_sectionExtents, Tensor b_blocks, Tensor b_strides, Tensor b_offsets, "
+    "int[]? c_modes, int[]? c_numSectionsPerMode, int[]? c_sectionExtents, Tensor c_blocks, Tensor c_strides, Tensor c_offsets, "
+    "int[] d_modes, int[] d_numSectionsPerMode, int[] d_sectionExtents, Tensor d_blocks, Tensor d_strides, Tensor d_offsets, "
+    "Tensor alpha, Tensor beta, int[]? descriptor_key_hashes) -> ()");
 }
 
 // Registers CPU implementations

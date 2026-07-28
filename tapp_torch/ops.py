@@ -5,7 +5,9 @@ import torch
 from torch import Tensor
 
 
-__all__ = ["tensor_product","tensordot","tensor_product_bs","tensordot_bs"]
+
+__all__ = ["tensor_product","tensordot","tensor_product_bs","tensordot_bs",
+           "tensor_product_bs_v2","tensordot_bs_v2"]
 TAPP_LOG_LEVEL = int(os.environ.get('TAPP_LOG_LEVEL', '0'))
 
 def tensor_product(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor, 
@@ -233,7 +235,8 @@ def tensor_product_bs(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
         beta_t= torch.tensor(beta, dtype= torch.float64, device='cpu')
     elif (isinstance(beta, float) and D.is_complex()) or isinstance(beta, complex):
         beta_t= torch.tensor(beta, dtype= torch.complex128, device='cpu')
-    
+    if TAPP_LOG_LEVEL > 5: torch.cuda.nvtx.mark(f"TAPP_tensor_product_bs_scalars_done")
+
     if TAPP_LOG_LEVEL > 5:
         torch.cuda.nvtx.range_push(f"TAPP_tensor_product_bs")
     torch.ops.tapp_torch.tensor_product_bs.default(A,B,C,D,
@@ -305,6 +308,7 @@ def tensordot_bs(A: Tensor, B: Tensor,
             The order of the remaining modes is preserved from A followed by B, unless modes_out is specified.
     """
     # Determine the output shape and reindex modes to match the tensor_product api
+    if TAPP_LOG_LEVEL > 5: torch.cuda.nvtx.mark(f"TAPP_tensordot_bs_mode_reindex_start")
     modes_A= list(range(len(a_numSectionsPerMode)))
     modes_B= [modes_A[contracted_modes_A[contracted_modes_B.index(n)]] if n in contracted_modes_B else j 
               for n,j in enumerate(range(len(a_numSectionsPerMode), len(a_numSectionsPerMode)+len(b_numSectionsPerMode)))]
@@ -315,14 +319,16 @@ def tensordot_bs(A: Tensor, B: Tensor,
     if modes_out is not None:
         assert len(modes_out)==len(modes_D), "modes_out must have the same length as the number of remaining modes"
         modes_D = [modes_D[i] for i in modes_out]
-
+    if TAPP_LOG_LEVEL > 5: torch.cuda.nvtx.mark(f"TAPP_tensordot_bs_mode_reindex_done")
     # TODO validation on metadata consistency (e.g. contracted modes must have same section extents, etc.)
 
     # Create an output tensor with the computed shape
     output_shape= _tensordot_bs_output_size(d_numSectionsPerMode, d_sectionExtents, d_blocks, d_offsets)
+    if TAPP_LOG_LEVEL > 5: torch.cuda.nvtx.mark(f"TAPP_tensordot_bs_output_shape_done")
     D = torch.empty(output_shape, dtype=A.dtype, device=A.device)
 
     # Perform the tensor product with alpha=1 and beta=0
+    if TAPP_LOG_LEVEL > 5: torch.cuda.nvtx.mark(f"TAPP_tensordot_bs_call_tensor_product_bs_alpha1_beta0")
     tensor_product_bs(A, B, None, D, 
         modes_A, a_numSectionsPerMode, a_sectionExtents, 
         a_blocks, a_strides , a_offsets,
@@ -457,3 +463,297 @@ def _setup_context_tensordot_bs(ctx, inputs, output):
 
 torch.library.register_autograd(
     "tapp_torch::tensordot_bs", _backward_tensordot_bs, setup_context=_setup_context_tensordot_bs)
+
+
+# ── v2 API ────────────────────────────────────────────────────────────────────
+# blocks / strides / offsets are passed as int64 CPU Tensors instead of
+# Sequence[int].  The custom_op dispatcher passes Tensors by reference (O(1)),
+# whereas Sequence[int] triggers per-element Python→C++ IValue boxing (O(N)).
+
+def tensor_product_bs_v2(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
+        a_modes: Sequence[int], a_numSectionsPerMode: Sequence[int], a_sectionExtents: Sequence[int],
+        a_blocks: Tensor, a_strides: Tensor, a_offsets: Tensor,
+        b_modes: Sequence[int], b_numSectionsPerMode: Sequence[int], b_sectionExtents: Sequence[int],
+        b_blocks: Tensor, b_strides: Tensor, b_offsets: Tensor,
+        c_modes: Union[Sequence[int],None], c_numSectionsPerMode: Union[Sequence[int],None],
+        c_sectionExtents: Union[Sequence[int],None],
+        c_blocks: Union[Tensor,None], c_strides: Union[Tensor,None], c_offsets: Union[Tensor,None],
+        d_modes: Sequence[int], d_numSectionsPerMode: Sequence[int], d_sectionExtents: Sequence[int],
+        d_blocks: Tensor, d_strides: Tensor, d_offsets: Tensor,
+        alpha: Union[float,complex,Tensor,None], beta: Union[float,complex,Tensor,None],
+        descriptor_key_hashes: Optional[Sequence[int]] = None) -> None:
+    """Like tensor_product_bs but block/stride/offset metadata are int64 CPU Tensors.
+
+    descriptor_key_hashes, if given, is a flat sequence of 24 ints: 3 consecutive 512-bit
+    (8 x int64) digests, one each for the A, B, D descriptor keys (numSectionsPerMode +
+    sectionExtents + blocks + strides). The caller must guarantee each digest is unique to that
+    combination; when provided, it is used in place of hashing those (potentially very large)
+    arrays on the C++ side for descriptor/contraction-plan cache lookups.
+    """
+    alpha_t, beta_t = None, None
+    if isinstance(alpha, Tensor):
+        alpha_t = alpha
+    elif isinstance(alpha, float) and not D.is_complex():
+        alpha_t = torch.tensor(alpha, dtype=torch.float64, device='cpu')
+    elif (isinstance(alpha, float) and D.is_complex()) or isinstance(alpha, complex):
+        alpha_t = torch.tensor(alpha, dtype=torch.complex128, device='cpu')
+    if isinstance(beta, Tensor):
+        beta_t = beta
+    elif isinstance(beta, float) and not D.is_complex():
+        beta_t = torch.tensor(beta, dtype=torch.float64, device='cpu')
+    elif (isinstance(beta, float) and D.is_complex()) or isinstance(beta, complex):
+        beta_t = torch.tensor(beta, dtype=torch.complex128, device='cpu')
+
+    if TAPP_LOG_LEVEL > 5:
+        torch.cuda.nvtx.range_push("TAPP_tensor_product_bs_v2")
+    torch.ops.tapp_torch.tensor_product_bs_v2.default(A, B, C, D,
+        a_modes, a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets,
+        b_modes, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
+        c_modes, c_numSectionsPerMode, c_sectionExtents, c_blocks, c_strides, c_offsets,
+        d_modes, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets,
+        alpha_t, beta_t, descriptor_key_hashes)
+    if TAPP_LOG_LEVEL > 5:
+        torch.cuda.nvtx.range_pop()
+
+
+def _tensordot_bs_v2_output_size(d_numSectionsPerMode, d_sectionExtents, d_blocks: Tensor,
+                                  d_offsets: Tensor) -> int:
+    d_sectionExtents_unflattened = []
+    idx = 0
+    for n in d_numSectionsPerMode:
+        d_sectionExtents_unflattened.append(d_sectionExtents[idx:idx+n])
+        idx += n
+    last_block = d_blocks[-len(d_numSectionsPerMode):].tolist()  # only ndim ints
+    return int(d_offsets[-1].item()) + prod(
+        [d_sectionExtents_unflattened[i][extent] for i, extent in enumerate(last_block)])
+
+
+def _reorder_descriptor_hashes(hashes: Optional[Sequence[int]], order: Sequence[int]) -> Optional[List[int]]:
+    """Reslices a flat 3x8-int64 descriptor_key_hashes buffer into a new (a, b, d) order.
+
+    tensordot_bs_v2's forward hashes are given in (A, B, D) order; the backward pass reuses the
+    same three underlying block-sparse structures (A, B, D) but in different a/b/d argument
+    positions for its two tensor_product_bs_v2 calls, so the digests must be reordered rather
+    than recomputed.
+    """
+    if hashes is None:
+        return None
+    chunks = [hashes[i * 8:(i + 1) * 8] for i in range(3)]
+    return [x for i in order for x in chunks[i]]
+
+
+@torch.library.custom_op("tapp_torch::tensordot_bs_v2", mutates_args=())
+def tensordot_bs_v2(A: Tensor, B: Tensor,
+        contracted_modes_A: List[int], contracted_modes_B: List[int],
+        a_numSectionsPerMode: List[int], a_sectionExtents: List[int],
+        a_blocks: Tensor, a_strides: Tensor, a_offsets: Tensor,
+        b_numSectionsPerMode: List[int], b_sectionExtents: List[int],
+        b_blocks: Tensor, b_strides: Tensor, b_offsets: Tensor,
+        d_numSectionsPerMode: List[int], d_sectionExtents: List[int],
+        d_blocks: Tensor, d_strides: Tensor, d_offsets: Tensor,
+        modes_out: Optional[List[int]] = None,
+        descriptor_key_hashes: Optional[List[int]] = None) -> Tensor:
+    """
+    Like tensordot_bs but block/stride/offset metadata are int64 CPU Tensors,
+    eliminating per-element IValue boxing overhead for large block arrays.
+
+    descriptor_key_hashes, if given, is a flat list of 24 ints: 3 consecutive 512-bit (8xint64)
+    digests for the A, B, D descriptor keys, in that order. See tensor_product_bs_v2.
+    """
+    if TAPP_LOG_LEVEL > 5:
+        torch.cuda.nvtx.mark("TAPP_tensordot_bs_v2_mode_reindex_start")
+    modes_A = list(range(len(a_numSectionsPerMode)))
+    modes_B = [modes_A[contracted_modes_A[contracted_modes_B.index(n)]] if n in contracted_modes_B else j
+               for n, j in enumerate(range(len(a_numSectionsPerMode),
+                                           len(a_numSectionsPerMode) + len(b_numSectionsPerMode)))]
+    remaining_modes_A = [i for i in modes_A if i not in contracted_modes_A]
+    remaining_modes_B = [j for n, j in enumerate(modes_B) if n not in contracted_modes_B]
+    modes_D = remaining_modes_A + remaining_modes_B
+    if modes_out is not None:
+        assert len(modes_out) == len(modes_D), "modes_out must have the same length as the number of remaining modes"
+        modes_D = [modes_D[i] for i in modes_out]
+    if TAPP_LOG_LEVEL > 5:
+        torch.cuda.nvtx.mark("TAPP_tensordot_bs_v2_mode_reindex_done")
+
+    output_shape = _tensordot_bs_v2_output_size(d_numSectionsPerMode, d_sectionExtents,
+                                                 d_blocks, d_offsets)
+    D = torch.empty(output_shape, dtype=A.dtype, device=A.device)
+
+    if TAPP_LOG_LEVEL > 5:
+        torch.cuda.nvtx.mark("TAPP_tensordot_bs_v2_call_tensor_product_bs_v2")
+    tensor_product_bs_v2(A, B, None, D,
+        modes_A, a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets,
+        modes_B, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
+        None, None, None, None, None, None,
+        modes_D, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets,
+        1., 0., descriptor_key_hashes)
+    return D
+
+
+@tensordot_bs_v2.register_fake
+def _(A, B, contracted_modes_A, contracted_modes_B,
+      a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets,
+      b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
+      d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets,
+      modes_out=None, descriptor_key_hashes=None):
+    output_shape = _tensordot_bs_v2_output_size(d_numSectionsPerMode, d_sectionExtents,
+                                                 d_blocks, d_offsets)
+    return torch.empty(output_shape, dtype=A.dtype, device=A.device)
+
+
+def _backward_tensordot_bs_v2(ctx, grad_D):
+    A, B = ctx.saved_tensors
+    shape_A, shape_B = ctx.shape_A, ctx.shape_B
+    a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets = ctx.struct_A
+    b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets = ctx.struct_B
+    d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets = ctx.struct_D
+    cidx_fwd_a = ctx.contracted_modes_A
+    cidx_fwd_b = ctx.contracted_modes_B
+    out_modes   = ctx.modes_out
+    fwd_hashes  = ctx.descriptor_key_hashes
+    grad_A, grad_B = None, None
+
+    ndim_A, ndim_B, ndim_D = len(a_numSectionsPerMode), len(b_numSectionsPerMode), len(d_numSectionsPerMode)
+
+    if out_modes is None:
+        out_modes = list(range(ndim_D))
+
+    oidx_fwd_a = [i for i in range(ndim_A) if i not in cidx_fwd_a]
+    oidx_fwd_b = [i for i in range(ndim_B) if i not in cidx_fwd_b]
+
+    if ctx.needs_input_grad[0]:
+        cidx_bwd_b = oidx_fwd_b
+        cidx_bwd_d = [out_modes.index(ndim_D - len(oidx_fwd_b) + n) for n, _ in enumerate(oidx_fwd_b)]
+
+        modes_B  = list(range(ndim_B))
+        modes_gD = list(range(ndim_B, ndim_B + ndim_D))
+        for n, i in enumerate(cidx_bwd_d): modes_gD[i] = modes_B[cidx_bwd_b[n]]
+
+        modes_gA = [None] * ndim_A
+        for n, i in enumerate(oidx_fwd_a): modes_gA[i] = modes_gD[out_modes.index(n)]
+        for n, i in enumerate(cidx_fwd_a): modes_gA[i] = modes_B[cidx_fwd_b[n]]
+
+        grad_A = torch.zeros_like(A) if A is not None else torch.zeros(shape_A, dtype=grad_D.dtype, device=grad_D.device)
+        tensor_product_bs_v2(grad_D, B.conj(), None, grad_A,
+            modes_gD, *ctx.struct_D,
+            modes_B,  *ctx.struct_B,
+            *(None,) * 6,
+            modes_gA, *ctx.struct_A,
+            alpha=1., beta=0.,
+            descriptor_key_hashes=_reorder_descriptor_hashes(fwd_hashes, (2, 1, 0)))
+
+    if ctx.needs_input_grad[1]:
+        cidx_bwd_a = oidx_fwd_a
+        cidx_bwd_d = [out_modes.index(n) for n, _ in enumerate(oidx_fwd_a)]
+
+        modes_A  = list(range(ndim_A))
+        modes_gD = list(range(ndim_A, ndim_A + ndim_D))
+        for n, i in enumerate(cidx_bwd_d): modes_gD[i] = modes_A[cidx_bwd_a[n]]
+
+        modes_gB = [None] * ndim_B
+        for n, i in enumerate(oidx_fwd_b): modes_gB[i] = modes_gD[out_modes.index(ndim_D - len(oidx_fwd_b) + n)]
+        for n, i in enumerate(cidx_fwd_b): modes_gB[i] = modes_A[cidx_fwd_a[n]]
+
+        grad_B = torch.zeros_like(B) if B is not None else torch.zeros(shape_B, dtype=grad_D.dtype, device=grad_D.device)
+        tensor_product_bs_v2(A.conj(), grad_D, None, grad_B,
+            modes_A,  *ctx.struct_A,
+            modes_gD, *ctx.struct_D,
+            *(None,) * 6,
+            modes_gB, *ctx.struct_B,
+            alpha=1.0, beta=0.0,
+            descriptor_key_hashes=_reorder_descriptor_hashes(fwd_hashes, (0, 2, 1)))
+
+    return grad_A, grad_B, *(None,) * 19
+
+
+def _setup_context_tensordot_bs_v2(ctx, inputs, output):
+    A, B, contracted_modes_A, contracted_modes_B, \
+        a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets, \
+        b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets, \
+        d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets, \
+        modes_out, descriptor_key_hashes = inputs
+    ctx.shape_A, ctx.shape_B = A.shape, B.shape
+    ctx.struct_A = a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets
+    ctx.struct_B = b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets
+    ctx.struct_D = d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets
+    ctx.contracted_modes_A = contracted_modes_A
+    ctx.contracted_modes_B = contracted_modes_B
+    ctx.modes_out = modes_out
+    ctx.descriptor_key_hashes = descriptor_key_hashes
+
+    saved_a, saved_b = None, None
+    if ctx.needs_input_grad[0]:
+        saved_b = B
+    if ctx.needs_input_grad[1]:
+        saved_a = A
+    ctx.save_for_backward(saved_a, saved_b)
+
+
+torch.library.register_autograd(
+    "tapp_torch::tensordot_bs_v2", _backward_tensordot_bs_v2,
+    setup_context=_setup_context_tensordot_bs_v2)
+
+
+# ── Block-sparse descriptor cache management (CUDA only) ─────────────────────
+try:
+    from . import _C_cuda
+
+    __all__ += ["descriptor_cache_clear", "descriptor_cache_set_max_size",
+                "descriptor_cache_stats", "descriptor_cache_size",
+                "plan_cache_clear", "plan_cache_set_max_size",
+                "plan_cache_stats", "plan_cache_size"]
+
+    def descriptor_cache_clear() -> None:
+        """Clear all entries from the block-sparse descriptor cache and reset hit/miss counters."""
+        _C_cuda.descriptor_cache_clear()
+
+    def descriptor_cache_set_max_size(n: int) -> None:
+        """Set the maximum number of entries in the descriptor cache.
+
+        If the current size exceeds *n*, the least-recently-used entries are evicted
+        immediately.  Pass 0 for unlimited capacity.
+        Defaults to 1024 or the value of the ``TAPP_DESCRIPTOR_CACHE_SIZE`` env var.
+        """
+        _C_cuda.descriptor_cache_set_max_size(n)
+
+    def descriptor_cache_stats() -> Tuple[int, int]:
+        """Return ``(hits, misses)`` counters for the block-sparse descriptor cache."""
+        return _C_cuda.descriptor_cache_stats()
+
+    def descriptor_cache_size() -> Tuple[int, int]:
+        """Return ``(count, host_bytes)`` for the descriptor cache.
+
+        *count* is the number of cached descriptors.
+        *host_bytes* is the estimated host-side memory used by the cache keys
+        (GPU-internal descriptor memory is not included).
+        """
+        return _C_cuda.descriptor_cache_size()
+
+    def plan_cache_clear() -> None:
+        """Clear all entries from the block-sparse contraction plan cache and reset hit/miss counters."""
+        _C_cuda.plan_cache_clear()
+
+    def plan_cache_set_max_size(n: int) -> None:
+        """Set the maximum number of entries in the contraction plan cache.
+
+        If the current size exceeds *n*, the least-recently-used entries are evicted
+        immediately.  Pass 0 for unlimited capacity.
+        Defaults to 256 or the value of the ``TAPP_PLAN_CACHE_SIZE`` env var.
+        """
+        _C_cuda.plan_cache_set_max_size(n)
+
+    def plan_cache_stats() -> Tuple[int, int]:
+        """Return ``(hits, misses)`` counters for the block-sparse contraction plan cache."""
+        return _C_cuda.plan_cache_stats()
+
+    def plan_cache_size() -> Tuple[int, int]:
+        """Return ``(count, host_bytes)`` for the contraction plan cache.
+
+        *count* is the number of cached plans.
+        *host_bytes* is the estimated host-side memory used by the cache keys
+        (GPU-internal plan memory is not included).
+        """
+        return _C_cuda.plan_cache_size()
+
+except ImportError:
+    pass

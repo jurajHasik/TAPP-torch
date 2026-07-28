@@ -23,6 +23,23 @@ if torch.__version__ >= "2.6.0":
 else:
     py_limited_api = False
 
+def detect_nvtx(include_dirs):
+    """Check which NVTX headers are available in the given include directories.
+    Returns extra link args needed: [] for nvtx3.hpp (header-only), ['-lnvToolsExt']
+    for legacy C API, or [] if NVTX is absent (marks become no-ops).
+    """
+    for d in include_dirs:
+        if os.path.exists(os.path.join(d, "nvtx3", "nvtx3.hpp")):
+            print(f"detect_nvtx: found nvtx3/nvtx3.hpp in {d} (header-only C++ API)")
+            return []
+    for d in include_dirs:
+        if os.path.exists(os.path.join(d, "nvtx3", "nvToolsExt.h")) or \
+           os.path.exists(os.path.join(d, "nvToolsExt.h")):
+            print(f"detect_nvtx: found legacy nvToolsExt.h in {d}, adding -lnvToolsExt")
+            return ["-lnvToolsExt"]
+    print("detect_nvtx: no NVTX headers found, NVTX might be ignored")
+    return []
+
 def locate_cutensor():
     cutensor_root = os.environ.get("CUTENSOR_ROOT")
     include_dir, lib_dir = None, None
@@ -212,15 +229,19 @@ def get_extensions():
     if use_cuda:
         cutensor_include_dir, cutensor_lib_dir= locate_cutensor()
         if cuda_sources:
+            cuda_include_dirs = [cutensor_include_dir] if cutensor_include_dir else []
+            if CUDA_HOME:
+                cuda_include_dirs.append(os.path.join(CUDA_HOME, "include"))
+            nvtx_link_args = detect_nvtx(cuda_include_dirs)
             ext_modules.append(
                 CUDAExtension(
                     f"{library_name}._C_cuda",
                     cuda_sources,
-                    include_dirs=[tapp_include_dir, 
+                    include_dirs=[tapp_include_dir,
                                   tapp_cutensor_include_dir,
                                   cutensor_include_dir],
                     extra_compile_args=extra_compile_args,
-                    extra_link_args=extra_link_args+[
+                    extra_link_args=extra_link_args+nvtx_link_args+[
                         f"-L{tapp_cutensor_lib_dir}",
                         f"-Wl,-rpath,{tapp_cutensor_lib_dir}",
                         f"-l{tapp_cutensor_lib_name}",

@@ -51,6 +51,44 @@ tapp_torch.ops.tensordot_bs(A: Tensor, B: Tensor,
         modes_out: Optional[Sequence[int]]=None) -> Tensor:
 ````
 
+The `v2` variants are faster, encoding block-sparse structure data (`*_blocks`, `*_strides`, `*_offsets`) directly as int64 CPU `Tensor`s instead of `Sequence[int]`, avoiding per-element Python→C++ boxing overhead for tensors with large numbers of blocks.
+
+````python
+tapp_torch.ops.tensor_product_bs_v2(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
+        a_modes: Sequence[int], a_numSectionsPerMode: Sequence[int], a_sectionExtents: Sequence[int],
+        a_blocks: Tensor, a_strides: Tensor, a_offsets: Tensor,
+        b_modes: Sequence[int], b_numSectionsPerMode: Sequence[int], b_sectionExtents: Sequence[int],
+        b_blocks: Tensor, b_strides: Tensor, b_offsets: Tensor,
+        c_modes: Union[Sequence[int],None], c_numSectionsPerMode: Union[Sequence[int],None], c_sectionExtents: Union[Sequence[int],None],
+        c_blocks: Union[Tensor,None], c_strides: Union[Tensor,None], c_offsets: Union[Tensor,None],
+        d_modes: Sequence[int], d_numSectionsPerMode: Sequence[int], d_sectionExtents: Sequence[int],
+        d_blocks: Tensor, d_strides: Tensor, d_offsets: Tensor,
+        alpha: Union[float,complex,Tensor,None], beta: Union[float,complex,Tensor,None],
+        descriptor_key_hashes: Optional[Sequence[int]]=None) -> None:
+````
+
+````python
+tapp_torch.ops.tensordot_bs_v2(A: Tensor, B: Tensor,
+        contracted_modes_A: Sequence[int], contracted_modes_B: Sequence[int],
+        a_numSectionsPerMode: Sequence[int], a_sectionExtents: Sequence[int],
+        a_blocks: Tensor, a_strides: Tensor, a_offsets: Tensor,
+        b_numSectionsPerMode: Sequence[int], b_sectionExtents: Sequence[int],
+        b_blocks: Tensor, b_strides: Tensor, b_offsets: Tensor,
+        d_numSectionsPerMode: Sequence[int], d_sectionExtents: Sequence[int],
+        d_blocks: Tensor, d_strides: Tensor, d_offsets: Tensor,
+        modes_out: Optional[Sequence[int]]=None,
+        descriptor_key_hashes: Optional[Sequence[int]]=None) -> Tensor:
+````
+
+Both `v2` ops additionally accept an optional `descriptor_key_hashes`: a flat sequence of 24 ints
+— 3 consecutive 512-bit (8×int64) digests, one each for the A, B, D block-sparse descriptor keys
+(`numSectionsPerMode + sectionExtents + blocks + strides`). If the caller already has a stable,
+unique identifier for each block-sparse structure (e.g. computed once and cached on the caller
+side), passing it here skips the O(number of blocks) hashing the descriptor/contraction-plan
+caches would otherwise perform on every call. **The caller is responsible for the digest actually
+being unique to its structure** — it is trusted as the sole cache identity, with no fallback
+comparison against the underlying arrays. See `TAPP_CACHE_STRICT` below to sanity-check this.
+
 Requires Pytorch 2.10+
 
 ## Examples
@@ -63,6 +101,26 @@ Light-weight interface for block-sparse tensors is provided by [symmray](https:/
 ## Performance benchmarks
 
 See `benchmarks` folder.
+
+## Caching
+
+Control caching of cuTensor block-sparse descriptors and plans. 
+
+* Block-sparse tensor descriptor cache: Size can be set via ``TAPP_DESCRIPTOR_CACHE_SIZE`` environment variable.
+Set to 0 for unlimited cache or to 4 or higher. Default is 1024.
+
+* Block-sparse contraction descriptor and plan cache: Size can be set via ``TAPP_PLAN_CACHE_SIZE`` environment variable.
+Set to 0 for unlimited cache or to 1 or higher. Default is 256.
+
+* Set ``TAPP_CACHE_STRICT=1`` to ignore any caller-supplied `descriptor_key_hashes` (see the `v2`
+ops above) and always use the strictly-correct, full-array-comparison cache path. Useful for
+verifying that a caller's hash computation is actually correct: run once normally and once with
+``TAPP_CACHE_STRICT=1`` and confirm identical results. Default is 0 (off).
+
+## Additional settings
+
+* Set ``CUTENSOR_BLOCKSPARSE_REPRODUCIBLE=1`` for bit-wise reproducibility. Default is 0.
+* Control logging by setting ``TAPP_LOG_LEVEL=<1..6>`` with 6 for highest verbosity level.
 
 ## Installation
 
@@ -88,6 +146,7 @@ pip install --no-build-isolation -e .
 * `TAPP_REFERENCE_USE_TBLIS=ON` to enable TBLIS for dense tensor contractions on `cpu`
 * `TAPP_REFERENCE_TBLIS_SOURCE_DIR=<path-to-tblis-source>` provide custom TBLIS source directory. Default set to `../../tblis`, which is to location of `tblis` submodule with respect to default build directory,
 * `TAPP_FORCE_BUILD=1` to rebuild TAPP i.e. clean default build dir and re-run CMake
+* `CUTENSOR_ROOT=<path-to-cutensor-root-directory>` to use different than default cuTensor installation
 
 Alternatively, go to `third_party/tapp` and build TAPP directly
 
@@ -149,13 +208,13 @@ pytest tests/test_tapp_torch.py::TestTensordot -s
 ### Block-sparse tensors
 
 ```bash
-pytest tests/test_tapp_torch.py::TestTensorProductBs -s
+pytest tests/test_tapp_bs_torch.py::TestTensorProductBs -s
 ```
 
 For `tensordot` subset, including gradients but **without torch.compile**
 
 ```bash
-pytest tests/test_tapp_torch.py::TestTensordotBs -s
+pytest tests/test_tapp_bs_torch.py::TestTensordotBs -s
 ```
 
 ### Requirements

@@ -144,6 +144,23 @@ class TestTensordot(TestCase):
 
             torch.testing.assert_close(result, expected)
 
+    @parametrize("device", ["cpu","cuda"] if torch.cuda.is_available() else ["cpu",])
+    @parametrize("dtype", DTYPE_OPTIONS)
+    def test_gradients_compiled(self, dtype, device):
+        samples = self.sample_inputs(dtype, device, requires_grad=True)
+        for args in samples:
+            torch._dynamo.reset() # compile afresh for each sample, rather than hitting the recompile limit
+            diff_tensors = [a for a in args if isinstance(a, torch.Tensor) and a.requires_grad]
+            op_specialized = torch.compile(lambda x, y: tapp_torch.ops.tensordot(x, y, *args[2:]), fullgraph=True)
+            out = op_specialized(*args[:2])
+            grad_out = torch.randn_like(out)
+            result = torch.autograd.grad(out, diff_tensors, grad_out)
+
+            out = reference_tensordot(*args)
+            expected = torch.autograd.grad(out, diff_tensors, grad_out)
+
+            torch.testing.assert_close(result, expected)
+
 
 instantiate_parametrized_tests(TestTensorProduct)
 instantiate_parametrized_tests(TestTensordot)

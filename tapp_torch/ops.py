@@ -39,6 +39,23 @@ def tensor_product(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
         torch.cuda.nvtx.range_pop()
 
 
+# Functional (out-of-place) variants of the mutable tensor_product* ops, used by the backward formulas.
+# Under torch.compile, a mutable op traced into a backward graph is auto-functionalized, which Inductor
+# cannot lower for complex inputs. An opaque functional custom op avoids this.
+@torch.library.custom_op("tapp_torch::tensor_product_functional", mutates_args=())
+def tensor_product_functional(A: Tensor, B: Tensor, modes_A: List[int], modes_B: List[int],
+                              modes_D: List[int], shape_D: List[int]) -> Tensor:
+    """Returns D= A*B, a new tensor of shape shape_D."""
+    D = torch.empty(shape_D, dtype=A.dtype, device=A.device)
+    tensor_product(A, B, None, D, modes_A, modes_B, None, modes_D, alpha=1.0, beta=0.0)
+    return D
+
+
+@tensor_product_functional.register_fake
+def _(A, B, modes_A, modes_B, modes_D, shape_D):
+    return torch.empty(shape_D, dtype=A.dtype, device=A.device)
+
+
 # NOTE signature for contracted_modes is not supported by torch custom_op 
 #
 # def tensordot(A: Tensor, B: Tensor, 
@@ -161,9 +178,7 @@ def _backward_tensordot(ctx, grad_D):
         for n,i in enumerate(oidx_fwd_a): modes_gA[i]= modes_gD[out_modes.index(n)]
         for n,i in enumerate(cidx_fwd_a): modes_gA[i]= modes_B[cidx_fwd_b[n]]
 
-        grad_A= torch.empty_like(A) if A is not None else torch.empty(shape_A, dtype=grad_D.dtype, device=grad_D.device)
-        tensor_product(grad_D, B.conj(), None, grad_A, modes_gD, modes_B, None, modes_gA,
-                   alpha=1.0, beta=0.0)
+        grad_A= tensor_product_functional(grad_D, B.conj_physical(), modes_gD, modes_B, modes_gA, list(shape_A))
 
     if ctx.needs_input_grad[1]:
         # dB_in,b = A_in,a dD_ab 
@@ -180,9 +195,7 @@ def _backward_tensordot(ctx, grad_D):
         for n,i in enumerate(oidx_fwd_b): modes_gB[i]= modes_gD[out_modes.index(grad_D.dim()-len(oidx_fwd_b)+n)]
         for n,i in enumerate(cidx_fwd_b): modes_gB[i]= modes_A[cidx_fwd_a[n]]
 
-        grad_B= torch.empty_like(B) if B is not None else torch.empty(shape_B, dtype=grad_D.dtype, device=grad_D.device)
-        tensor_product(A.conj(), grad_D, None, grad_B, modes_A, modes_gD, None, modes_gB,
-                   alpha=1.0, beta=0.0)
+        grad_B= tensor_product_functional(A.conj_physical(), grad_D, modes_A, modes_gD, modes_gB, list(shape_B))
 
     return grad_A, grad_B, None, None, None
 
@@ -236,6 +249,9 @@ def tensor_product_bs(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
     elif (isinstance(beta, float) and D.is_complex()) or isinstance(beta, complex):
         beta_t= torch.tensor(beta, dtype= torch.complex128, device='cpu')
     if TAPP_LOG_LEVEL > 5: torch.cuda.nvtx.mark(f"TAPP_tensor_product_bs_scalars_done")
+    # blocks are addressed as data_ptr + offset, hence operands must be contiguous (no-op if they are)
+    A, B= A.contiguous(), B.contiguous()
+    C= C.contiguous() if C is not None else None
 
     if TAPP_LOG_LEVEL > 5:
         torch.cuda.nvtx.range_push(f"TAPP_tensor_product_bs")
@@ -247,6 +263,35 @@ def tensor_product_bs(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
         alpha_t,beta_t)
     if TAPP_LOG_LEVEL > 5:
         torch.cuda.nvtx.range_pop()
+
+
+# Functional variant of tensor_product_bs used by the backward formulas, see tensor_product_functional.
+@torch.library.custom_op("tapp_torch::tensor_product_bs_functional", mutates_args=())
+def tensor_product_bs_functional(A: Tensor, B: Tensor,
+        a_modes: Sequence[int], a_numSectionsPerMode: Sequence[int], a_sectionExtents: Sequence[int],
+        a_blocks: Sequence[int], a_strides: Sequence[int], a_offsets: Sequence[int],
+        b_modes: Sequence[int], b_numSectionsPerMode: Sequence[int], b_sectionExtents: Sequence[int],
+        b_blocks: Sequence[int], b_strides: Sequence[int], b_offsets: Sequence[int],
+        d_modes: Sequence[int], d_numSectionsPerMode: Sequence[int], d_sectionExtents: Sequence[int],
+        d_blocks: Sequence[int], d_strides: Sequence[int], d_offsets: Sequence[int],
+        d_numel: int) -> Tensor:
+    """Returns D= A*B over block-sparse tensors, a new 1D tensor of d_numel elements.
+    D is zero-initialized, i.e., blocks of D receiving no contribution are zero."""
+    D = torch.zeros(d_numel, dtype=A.dtype, device=A.device)
+    tensor_product_bs(A, B, None, D,
+        a_modes, a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets,
+        b_modes, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
+        None, None, None, None, None, None,
+        d_modes, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets,
+        1., 0.)
+    return D
+
+
+@tensor_product_bs_functional.register_fake
+def _(A, B, a_modes, a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets,
+        b_modes, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
+        d_modes, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets, d_numel):
+    return torch.empty(d_numel, dtype=A.dtype, device=A.device)
 
 
 def _tensordot_bs_output_size(d_numSectionsPerMode, d_sectionExtents, d_blocks, d_offsets)-> int:
@@ -407,13 +452,11 @@ def _backward_tensordot_bs(ctx, grad_D):
         for n,i in enumerate(oidx_fwd_a): modes_gA[i]= modes_gD[out_modes.index(n)]
         for n,i in enumerate(cidx_fwd_a): modes_gA[i]= modes_B[cidx_fwd_b[n]]
 
-        grad_A= torch.zeros_like(A) if A is not None else torch.zeros(shape_A, dtype=grad_D.dtype, device=grad_D.device)
-        tensor_product_bs(grad_D, B.conj(), None, grad_A, 
+        grad_A= tensor_product_bs_functional(grad_D, B.conj_physical(),
             modes_gD, *ctx.struct_D,
             modes_B, *ctx.struct_B,
-            *(None,)*6,
             modes_gA, *ctx.struct_A,
-            alpha=1., beta=0.)
+            shape_A.numel())
 
     if ctx.needs_input_grad[1]:
         # dB_in,b = A_in,a dD_ab
@@ -430,13 +473,11 @@ def _backward_tensordot_bs(ctx, grad_D):
         for n,i in enumerate(oidx_fwd_b): modes_gB[i]= modes_gD[out_modes.index(ndim_D-len(oidx_fwd_b)+n)]
         for n,i in enumerate(cidx_fwd_b): modes_gB[i]= modes_A[cidx_fwd_a[n]]
 
-        grad_B= torch.zeros_like(B) if B is not None else torch.zeros(shape_B, dtype=grad_D.dtype, device=grad_D.device)
-        tensor_product_bs(A.conj(), grad_D, None, grad_B, 
+        grad_B= tensor_product_bs_functional(A.conj_physical(), grad_D,
             modes_A, *ctx.struct_A,
             modes_gD, *ctx.struct_D,
-            *(None,)*6,
             modes_gB, *ctx.struct_B,
-            alpha=1.0, beta=0.0)
+            shape_B.numel())
 
     return grad_A, grad_B, *(None,)*18
 
@@ -503,6 +544,9 @@ def tensor_product_bs_v2(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
         beta_t = torch.tensor(beta, dtype=torch.float64, device='cpu')
     elif (isinstance(beta, float) and D.is_complex()) or isinstance(beta, complex):
         beta_t = torch.tensor(beta, dtype=torch.complex128, device='cpu')
+    # blocks are addressed as data_ptr + offset, hence operands must be contiguous (no-op if they are)
+    A, B = A.contiguous(), B.contiguous()
+    C = C.contiguous() if C is not None else None
 
     if TAPP_LOG_LEVEL > 5:
         torch.cuda.nvtx.range_push("TAPP_tensor_product_bs_v2")
@@ -514,6 +558,35 @@ def tensor_product_bs_v2(A: Tensor, B: Tensor, C: Union[Tensor,None], D: Tensor,
         alpha_t, beta_t, descriptor_key_hashes)
     if TAPP_LOG_LEVEL > 5:
         torch.cuda.nvtx.range_pop()
+
+
+# Functional variant of tensor_product_bs_v2 used by the backward formulas, see tensor_product_functional.
+@torch.library.custom_op("tapp_torch::tensor_product_bs_v2_functional", mutates_args=())
+def tensor_product_bs_v2_functional(A: Tensor, B: Tensor,
+        a_modes: List[int], a_numSectionsPerMode: List[int], a_sectionExtents: List[int],
+        a_blocks: Tensor, a_strides: Tensor, a_offsets: Tensor,
+        b_modes: List[int], b_numSectionsPerMode: List[int], b_sectionExtents: List[int],
+        b_blocks: Tensor, b_strides: Tensor, b_offsets: Tensor,
+        d_modes: List[int], d_numSectionsPerMode: List[int], d_sectionExtents: List[int],
+        d_blocks: Tensor, d_strides: Tensor, d_offsets: Tensor,
+        d_numel: int, descriptor_key_hashes: Optional[List[int]] = None) -> Tensor:
+    """Like tensor_product_bs_functional, but block/stride/offset metadata are int64 CPU Tensors."""
+    D = torch.zeros(d_numel, dtype=A.dtype, device=A.device)
+    tensor_product_bs_v2(A, B, None, D,
+        a_modes, a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets,
+        b_modes, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
+        None, None, None, None, None, None,
+        d_modes, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets,
+        1., 0., descriptor_key_hashes)
+    return D
+
+
+@tensor_product_bs_v2_functional.register_fake
+def _(A, B, a_modes, a_numSectionsPerMode, a_sectionExtents, a_blocks, a_strides, a_offsets,
+      b_modes, b_numSectionsPerMode, b_sectionExtents, b_blocks, b_strides, b_offsets,
+      d_modes, d_numSectionsPerMode, d_sectionExtents, d_blocks, d_strides, d_offsets,
+      d_numel, descriptor_key_hashes=None):
+    return torch.empty(d_numel, dtype=A.dtype, device=A.device)
 
 
 def _tensordot_bs_v2_output_size(d_numSectionsPerMode, d_sectionExtents, d_blocks: Tensor,
@@ -633,14 +706,11 @@ def _backward_tensordot_bs_v2(ctx, grad_D):
         for n, i in enumerate(oidx_fwd_a): modes_gA[i] = modes_gD[out_modes.index(n)]
         for n, i in enumerate(cidx_fwd_a): modes_gA[i] = modes_B[cidx_fwd_b[n]]
 
-        grad_A = torch.zeros_like(A) if A is not None else torch.zeros(shape_A, dtype=grad_D.dtype, device=grad_D.device)
-        tensor_product_bs_v2(grad_D, B.conj(), None, grad_A,
+        grad_A = tensor_product_bs_v2_functional(grad_D, B.conj_physical(),
             modes_gD, *ctx.struct_D,
             modes_B,  *ctx.struct_B,
-            *(None,) * 6,
             modes_gA, *ctx.struct_A,
-            alpha=1., beta=0.,
-            descriptor_key_hashes=_reorder_descriptor_hashes(fwd_hashes, (2, 1, 0)))
+            shape_A.numel(), _reorder_descriptor_hashes(fwd_hashes, (2, 1, 0)))
 
     if ctx.needs_input_grad[1]:
         cidx_bwd_a = oidx_fwd_a
@@ -654,14 +724,11 @@ def _backward_tensordot_bs_v2(ctx, grad_D):
         for n, i in enumerate(oidx_fwd_b): modes_gB[i] = modes_gD[out_modes.index(ndim_D - len(oidx_fwd_b) + n)]
         for n, i in enumerate(cidx_fwd_b): modes_gB[i] = modes_A[cidx_fwd_a[n]]
 
-        grad_B = torch.zeros_like(B) if B is not None else torch.zeros(shape_B, dtype=grad_D.dtype, device=grad_D.device)
-        tensor_product_bs_v2(A.conj(), grad_D, None, grad_B,
+        grad_B = tensor_product_bs_v2_functional(A.conj_physical(), grad_D,
             modes_A,  *ctx.struct_A,
             modes_gD, *ctx.struct_D,
-            *(None,) * 6,
             modes_gB, *ctx.struct_B,
-            alpha=1.0, beta=0.0,
-            descriptor_key_hashes=_reorder_descriptor_hashes(fwd_hashes, (0, 2, 1)))
+            shape_B.numel(), _reorder_descriptor_hashes(fwd_hashes, (0, 2, 1)))
 
     return grad_A, grad_B, *(None,) * 19
 

@@ -165,6 +165,14 @@ def make_sample_tensordot_bs(
         + res[5:5+5] + res[11:11+5] + res[23:23+5] + (modes_out,)
 
 
+def make_sample_tensordot_bs_v2(*args, **kwargs):
+    """Same as make_sample_tensordot_bs, but blocks/strides/offsets are int64 CPU tensors (v2 API)."""
+    res= list(make_sample_tensordot_bs(*args, **kwargs))
+    for i in (6, 7, 8, 11, 12, 13, 16, 17, 18): # blocks, strides, offsets of A, B and D
+        res[i]= torch.tensor(res[i], dtype=torch.int64)
+    return tuple(res)
+
+
 def preprocess_structure(case):    
     a_modes= case["modes_A"]
     b_modes= case["modes_B"]
@@ -417,6 +425,19 @@ class TestTensorProductBs(TestCase):
             [ a.requires_grad_(True) for a in args_tapp_torch_bs[:3] ]
             opcheck(op, args_tapp_torch_bs)
 
+    @parametrize("device", ["cuda"] if torch.cuda.is_available() else [])
+    @parametrize("operand", ["A", "B", "C", "D"])
+    def test_noncontiguous_operand_raises(self, device, operand):
+        # blocks are addressed as data_ptr + offset, hence non-contiguous operands must be rejected
+        sample = self.sample_inputs(torch.float64, device)[0]
+        expected= reference_tensor_product_bs(*sample)
+        args= list(make_sample_tensor_product_bs(
+            *sample[:3], expected, *sample[3:], device=device, requires_grad=False))
+        i= "ABCD".index(operand)
+        args[i]= args[i][:1].expand(args[i].shape) # stride-0 view of the same shape
+        with self.assertRaisesRegex(RuntimeError, "contiguous"):
+            torch.ops.tapp_torch.tensor_product_bs.default(*args)
+
 
 class TestTensordotBs(TestCase):
 
@@ -499,18 +520,24 @@ class TestTensordotBs(TestCase):
 
     @parametrize("device", ["cuda"] if torch.cuda.is_available() else [])
     @parametrize("dtype", DTYPE_OPTIONS)
-    def test_gradients(self, dtype, device):
+    @parametrize("api", ["v1", "v2"])
+    @parametrize("grad_out_layout", ["contiguous", "expanded"])
+    def test_gradients(self, dtype, device, api, grad_out_layout):
         samples = self.sample_inputs(dtype, device, requires_grad=False)
+        op, make_sample= (tapp_torch.ops.tensordot_bs, make_sample_tensordot_bs) if api=="v1" \
+            else (tapp_torch.ops.tensordot_bs_v2, make_sample_tensordot_bs_v2)
         for sample in samples:
             # get structure of the resulting block-sparse tensor D
             expected = reference_tensordot_bs(*sample)
 
-            args_tapp_torch_bs= make_sample_tensordot_bs( 
+            args_tapp_torch_bs= make_sample(
                 *sample[:2], expected, *sample[2:], device=device, requires_grad=True)
-            
+
             diff_tensors = [a for a in args_tapp_torch_bs if isinstance(a, torch.Tensor) and a.requires_grad]
-            out = tapp_torch.ops.tensordot_bs(*args_tapp_torch_bs)
-            grad_out = torch.randn_like(out)
+            out = op(*args_tapp_torch_bs)
+            # "expanded" is a stride-0 grad_out, as delivered by autograd for e.g. out.sum()
+            grad_out = torch.randn_like(out) if grad_out_layout=="contiguous" \
+                else torch.randn((), dtype=out.dtype, device=out.device).expand(out.shape)
             grad_a, grad_b = torch.autograd.grad(out, diff_tensors, grad_out)
 
             def f_reference_tensordot_bs(a,b):

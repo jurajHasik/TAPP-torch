@@ -494,6 +494,10 @@ void tensor_product_bs_cuda_dispatch(
   STD_TORCH_CHECK(A.dim() == 1, "Tensor A must be 1D.");
   STD_TORCH_CHECK(B.dim() == 1, "Tensor B must be 1D.");
   STD_TORCH_CHECK(D.dim() == 1, "Tensor D must be 1D.");
+  // Blocks are addressed as data_ptr + offset (see fill_block_pointers), i.e., storage must be dense.
+  STD_TORCH_CHECK(A.is_contiguous(), "Tensor A must be contiguous.");
+  STD_TORCH_CHECK(B.is_contiguous(), "Tensor B must be contiguous.");
+  STD_TORCH_CHECK(D.is_contiguous(), "Tensor D must be contiguous.");
   STD_TORCH_CHECK(A.scalar_type() == B.scalar_type() && A.scalar_type() == D.scalar_type(), "All tensors must have the same dtype.");
   
   STD_TORCH_CHECK(A.device().type() == torch::headeronly::DeviceType::CUDA);
@@ -507,6 +511,7 @@ void tensor_product_bs_cuda_dispatch(
 
   if (C.defined()) {
     STD_TORCH_CHECK(C.dim() == 1, "Tensor C must be 1D.");
+    STD_TORCH_CHECK(C.is_contiguous(), "Tensor C must be contiguous.");
     STD_TORCH_CHECK(A.scalar_type() == C.scalar_type(), "Tensor C must have the same dtype as D (add A and B)");
     STD_TORCH_CHECK(C.device().type() == torch::headeronly::DeviceType::CUDA);
   } else {
